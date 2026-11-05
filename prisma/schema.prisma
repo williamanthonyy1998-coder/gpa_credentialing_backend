@@ -1,0 +1,426 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  CREDENTIALING_MANAGER
+  CREDENTIALING_SPECIALIST
+  ENROLLMENT_SPECIALIST
+  APPROVER
+  AUDITOR
+  READ_ONLY
+}
+enum RecordStatus {
+  ACTIVE
+  INACTIVE
+  PENDING
+  ARCHIVED
+}
+enum CaseStatus {
+  DRAFT
+  INFORMATION_NEEDED
+  UNDER_REVIEW
+  VERIFICATION_PENDING
+  READY_FOR_APPROVAL
+  APPROVED
+  REJECTED
+  ON_HOLD
+}
+enum EnrollmentStatus {
+  NOT_STARTED
+  PREPARING
+  READY_TO_SUBMIT
+  SUBMITTED
+  PAYER_REVIEW
+  ADDITIONAL_INFORMATION_NEEDED
+  APPROVED
+  DENIED
+  WITHDRAWN
+}
+enum TaskStatus {
+  OPEN
+  IN_PROGRESS
+  BLOCKED
+  COMPLETED
+  CANCELLED
+}
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+enum DocumentStatus {
+  MISSING
+  RECEIVED
+  UNDER_REVIEW
+  VERIFIED
+  REJECTED
+  EXPIRED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         Role     @default(CREDENTIALING_SPECIALIST)
+  active       Boolean  @default(true)
+  employeeCode String?  @unique
+  department   String?
+  jobTitle     String?
+  phone        String?
+  managerId    String?
+  manager      User?    @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
+  directReports User[]  @relation("EmployeeManager")
+  @@index([managerId])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  auditEvents  AuditEvent[]
+  tasks        Task[]   @relation("TaskAssignee")
+  createdTasks Task[]   @relation("TaskCreator")
+}
+
+model Organization {
+  id             String   @id @default(cuid())
+  legalName      String
+  dba            String?
+  taxId          String?
+  establishedAt  DateTime?
+  status         RecordStatus @default(ACTIVE)
+  contactName    String?
+  contactTitle   String?
+  phone          String?
+  fax            String?
+  email          String?
+  mailingAddress Json?
+  ownership      Json?
+  bankName       String?
+  bankAccountTitle String?
+  bankAccountNumber String?
+  bankRoutingNumber String?
+  bankContactName String?
+  bankContactPhone String?
+  bankContactEmail String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  practices      Practice[]
+  facilities     Facility[]
+  providerAffiliations ProviderOrganization[]
+  enrollments    EnrollmentApplication[]
+  documents      Document[]
+  auditEvents    AuditEvent[]
+}
+
+model Practice {
+  id             String   @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  legalName      String?
+  npi            String?
+  taxId          String?
+  dba            String?
+  taxonomyCode   String?
+  establishedAt  DateTime?
+  contactName    String?
+  contactTitle   String?
+  phone          String?
+  fax            String?
+  email          String?
+  mailingAddress Json?
+  primaryAddress Json?
+  status         RecordStatus @default(ACTIVE)
+  providers      ProviderPractice[]
+  facilities     Facility[]
+  cases          CredentialingCase[]
+  enrollments    EnrollmentApplication[]
+  documents      Document[]
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([organizationId])
+  @@index([npi])
+}
+
+model Facility {
+  id          String   @id @default(cuid())
+  practiceId  String?
+  practice    Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  name        String
+  npi         String?
+  contactName String?
+  contactTitle String?
+  phone       String?
+  fax         String?
+  email       String?
+  address     Json?
+  schedule    Json?
+  status      RecordStatus @default(ACTIVE)
+  providers   ProviderFacility[]
+  documents   Document[]
+  enrollments EnrollmentApplication[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([practiceId])
+  @@index([organizationId])
+}
+
+model Provider {
+  id                 String   @id @default(cuid())
+  firstName          String
+  middleName         String?
+  lastName           String
+  npi                String?  @unique
+  dateOfBirth        DateTime?
+  placeOfBirth       String?
+  ssn                String?
+  citizenship        String?
+  gender             String?
+  email              String?
+  homePhone          String?
+  workPhone          String?
+  address            Json?
+  primarySpecialty   String?
+  secondarySpecialty String?
+  taxonomyCode       String?
+  professionalType   String?
+  supervisorName     String?
+  status             RecordStatus @default(PENDING)
+  licenses           License[]
+  practices          ProviderPractice[]
+  organizations      ProviderOrganization[]
+  facilities         ProviderFacility[]
+  cases              CredentialingCase[]
+  enrollments        EnrollmentApplication[]
+  documents          Document[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  @@index([lastName, firstName])
+  @@index([status])
+}
+
+model ProviderPractice {
+  providerId String
+  practiceId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  practice   Practice @relation(fields: [practiceId], references: [id], onDelete: Cascade)
+  affiliationTitle String?
+  effectiveAt DateTime?
+  endAt DateTime?
+  @@id([providerId, practiceId])
+}
+
+model ProviderFacility {
+  providerId String
+  facilityId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  facility   Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  approvalStatus String?
+  effectiveAt DateTime?
+  endAt DateTime?
+  @@id([providerId, facilityId])
+}
+
+model ProviderOrganization {
+  id             String @id @default(cuid())
+  providerId     String
+  organizationId String
+  provider       Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  affiliationTitle String?
+  effectiveAt    DateTime?
+  endAt          DateTime?
+  status         RecordStatus @default(ACTIVE)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@unique([providerId, organizationId])
+  @@index([organizationId, status])
+}
+
+model License {
+  id          String   @id @default(cuid())
+  providerId  String
+  provider    Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  type        String
+  number      String?
+  state       String?
+  issuedAt    DateTime?
+  expiresAt   DateTime?
+  status      DocumentStatus @default(RECEIVED)
+  issuingBody String?
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([providerId, expiresAt])
+}
+
+model Document {
+  id             String @id @default(cuid())
+  title          String
+  type           String
+  status         DocumentStatus @default(RECEIVED)
+  storageKey     String?
+  originalName   String?
+  mimeType       String?
+  sizeBytes      Int?
+  issuedAt       DateTime?
+  expiresAt      DateTime?
+  verifiedAt     DateTime?
+  verifiedBy     String?
+  notes          String?
+  providerId     String?
+  provider       Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  practiceId     String?
+  practice       Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  facilityId     String?
+  facility       Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([type, status])
+  @@index([expiresAt])
+}
+
+model CredentialingCase {
+  id          String @id @default(cuid())
+  caseNumber  String @unique
+  providerId  String
+  provider    Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  practiceId  String?
+  practice    Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  status      CaseStatus @default(DRAFT)
+  assignedTo  String?
+  dueAt       DateTime?
+  submittedAt DateTime?
+  decisionAt  DateTime?
+  decisionBy  String?
+  decisionReason String?
+  checklist   Json?
+  notes       String?
+  statusHistory StatusHistory[]
+  tasks       Task[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([status, dueAt])
+}
+
+model Payer {
+  id        String @id @default(cuid())
+  name      String
+  payerCode String?
+  website   String?
+  phone     String?
+  status    RecordStatus @default(ACTIVE)
+  plans     PayerPlan[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([name, payerCode])
+}
+
+model PayerPlan {
+  id        String @id @default(cuid())
+  payerId   String
+  payer     Payer @relation(fields: [payerId], references: [id], onDelete: Cascade)
+  name      String
+  planType  String?
+  checklist Json?
+  enrollments EnrollmentApplication[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([payerId, name])
+}
+
+model EnrollmentApplication {
+  id            String @id @default(cuid())
+  applicationNo String @unique
+  providerId    String?
+  provider      Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  facilityId    String?
+  facility      Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  practiceId    String?
+  practice      Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  payerPlanId   String
+  payerPlan     PayerPlan @relation(fields: [payerPlanId], references: [id], onDelete: Restrict)
+  status        EnrollmentStatus @default(NOT_STARTED)
+  assignedTo    String?
+  dueAt         DateTime?
+  submittedAt   DateTime?
+  referenceNo   String?
+  lastFollowUpAt DateTime?
+  nextFollowUpAt DateTime?
+  effectiveAt   DateTime?
+  decisionAt    DateTime?
+  decisionReason String?
+  checklist     Json?
+  notes         String?
+  statusHistory StatusHistory[]
+  tasks         Task[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  @@index([status, nextFollowUpAt])
+  @@index([organizationId, status])
+  @@index([providerId, payerPlanId])
+}
+
+model Task {
+  id             String @id @default(cuid())
+  title          String
+  description    String?
+  status         TaskStatus @default(OPEN)
+  priority       Priority @default(NORMAL)
+  dueAt          DateTime?
+  assignedToId   String?
+  assignedTo     User? @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdById    String?
+  createdBy      User? @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  caseId         String?
+  credentialingCase CredentialingCase? @relation(fields: [caseId], references: [id], onDelete: SetNull)
+  enrollmentId   String?
+  enrollment     EnrollmentApplication? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  @@index([status, dueAt])
+}
+
+model StatusHistory {
+  id           String @id @default(cuid())
+  fromStatus   String?
+  toStatus     String
+  changedBy    String?
+  reason       String?
+  caseId       String?
+  credentialingCase CredentialingCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  enrollmentId String?
+  enrollment   EnrollmentApplication? @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  createdAt    DateTime @default(now())
+  @@index([caseId, createdAt])
+  @@index([enrollmentId, createdAt])
+}
+
+model AuditEvent {
+  id             String @id @default(cuid())
+  actorId        String?
+  actor          User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  action         String
+  entityType     String
+  entityId       String?
+  before         Json?
+  after          Json?
+  ipAddress      String?
+  createdAt      DateTime @default(now())
+  @@index([entityType, entityId, createdAt])
+  @@index([createdAt])
+}
