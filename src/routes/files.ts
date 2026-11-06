@@ -35,6 +35,7 @@ router.get('/:id/file', async (req: AuthRequest, res, next) => {
     const fullPath = path.resolve(uploadDir, safeName);
     if (!fullPath.startsWith(uploadDir + path.sep) || !fs.existsSync(fullPath)) return res.status(404).json({ error: 'Stored file was not found' });
     res.setHeader('X-Content-Type-Options', 'nosniff');
+    await audit(req, 'DOWNLOAD', 'documents', document.id, undefined, { originalName: document.originalName, title: document.title });
     res.download(fullPath, path.basename(document.originalName || document.title));
   } catch (e) { next(e); }
 });

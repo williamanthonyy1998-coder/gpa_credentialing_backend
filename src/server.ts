@@ -10,13 +10,20 @@ import dashboardRoutes from './routes/dashboard';
 import resourcesRoutes from './routes/resources';
 import filesRoutes from './routes/files';
 import employeesRoutes from './routes/employees';
+import directoryRoutes from './routes/directory';
+import credentialsRoutes from './routes/credentials';
 import { authenticate } from './middleware/auth';
 import { prisma } from './lib/prisma';
 
 const app = express();
 app.disable('x-powered-by');
-app.use(helmet());
-app.use(cors({ origin: (process.env.WEB_ORIGIN || 'http://localhost:5173').split(',').map(x => x.trim()), credentials: false }));
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }
+}));
+app.use(cors({
+  origin: (process.env.WEB_ORIGIN || 'http://localhost:5173,http://localhost:5174').split(',').map(x => x.trim()),
+  credentials: false
+}));
 app.use(express.json({ limit: '1mb' }));
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 500, standardHeaders: true, legacyHeaders: false }));
@@ -28,6 +35,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/employees', authenticate, employeesRoutes);
 app.use('/api/dashboard', authenticate, dashboardRoutes);
 app.use('/api/documents', authenticate, filesRoutes);
+app.use('/api/directory', authenticate, directoryRoutes);
+app.use('/api/credentials', authenticate, credentialsRoutes);
 app.use('/api', authenticate, resourcesRoutes);
 app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   if (err instanceof ZodError) return res.status(400).json({ error: 'Validation failed', details: err.issues.map(i => ({ path: i.path.join('.'), message: i.message })) });
