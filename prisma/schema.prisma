@@ -76,9 +76,20 @@ model User {
   department   String?
   jobTitle     String?
   phone        String?
+  timezone     String?  @default("UTC")
+  workSchedule Json?
   managerId    String?
   manager      User?    @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
   directReports User[]  @relation("EmployeeManager")
+  organizations UserOrganization[]
+  leaveRequests LeaveRequest[] @relation("LeaveApplicant")
+  leaveReviews  LeaveRequest[] @relation("LeaveReviewer")
+  leaveBalances LeaveBalance[]
+  attendance    AttendanceRecord[]
+  notifications Notification[]
+  taskComments  TaskComment[]
+  intakeAssigned IntakeRequest[] @relation("IntakeAssignee")
+  intakeCreated  IntakeRequest[] @relation("IntakeCreator")
   @@index([managerId])
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
@@ -86,6 +97,17 @@ model User {
   tasks        Task[]   @relation("TaskAssignee")
   createdTasks Task[]   @relation("TaskCreator")
   createdDocuments Document[] @relation("DocumentCreator")
+}
+
+model UserOrganization {
+  id             String   @id @default(cuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  createdAt      DateTime @default(now())
+  @@unique([userId, organizationId])
+  @@index([organizationId])
 }
 
 model Organization {
@@ -117,6 +139,9 @@ model Organization {
   enrollments    EnrollmentApplication[]
   documents      Document[]
   auditEvents    AuditEvent[]
+  members        UserOrganization[]
+  tasks          Task[]
+  intakeRequests IntakeRequest[]
 }
 
 model Practice {
@@ -151,6 +176,7 @@ model Practice {
   cases          CredentialingCase[]
   enrollments    EnrollmentApplication[]
   documents      Document[]
+  tasks          Task[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([organizationId])
@@ -200,7 +226,9 @@ model Facility {
   providers   ProviderFacility[]
   contacts    FacilityContact[]
   documents   Document[]
+  documentLinks DocumentFacility[]
   enrollments EnrollmentApplication[]
+  tasks       Task[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   @@index([practiceId])
@@ -250,6 +278,8 @@ model Provider {
   cases              CredentialingCase[]
   enrollments        EnrollmentApplication[]
   documents          Document[]
+  documentLinks      DocumentProvider[]
+  tasks              Task[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   @@index([lastName, firstName])
@@ -330,6 +360,19 @@ model Document {
   required       Boolean @default(false)
   reportingRequired Boolean @default(false)
   warningDays    Int?
+  policyNumber   String?
+  perOccurrence  Decimal? @db.Decimal(14, 2)
+  aggregate      Decimal? @db.Decimal(14, 2)
+  insuranceCompany String?
+  namedInsured   String?
+  // Banking credential fields (Bank Letter / Voided Check). Sensitive values encrypted at rest.
+  bankName         String?
+  bankTitle        String?
+  bankRoutingNumber String?
+  bankAccountType  String?
+  bankPhoneNumber  String?
+  bankAccountHolder String?
+  uploadedAt       DateTime?
   createdById    String?
   createdBy      User? @relation("DocumentCreator", fields: [createdById], references: [id], onDelete: SetNull)
   providerId     String?
@@ -340,12 +383,34 @@ model Document {
   practice       Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
   facilityId     String?
   facility       Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  documentFacilities DocumentFacility[]
+  documentProviders  DocumentProvider[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([type, status])
   @@index([category, status])
   @@index([expiresAt])
   @@index([facilityId, category])
+}
+
+model DocumentFacility {
+  documentId String
+  facilityId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  facility   Facility @relation(fields: [facilityId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  @@id([documentId, facilityId])
+  @@index([facilityId])
+}
+
+model DocumentProvider {
+  documentId String
+  providerId String
+  document   Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  @@id([documentId, providerId])
+  @@index([providerId])
 }
 
 model CredentialingCase {
@@ -442,13 +507,35 @@ model Task {
   assignedTo     User? @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
   createdById    String?
   createdBy      User? @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  practiceId     String?
+  practice       Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  facilityId     String?
+  facility       Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  providerId     String?
+  provider       Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
   caseId         String?
   credentialingCase CredentialingCase? @relation(fields: [caseId], references: [id], onDelete: SetNull)
   enrollmentId   String?
   enrollment     EnrollmentApplication? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  comments       TaskComment[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([status, dueAt])
+  @@index([organizationId, status])
+  @@index([assignedToId, status])
+}
+
+model TaskComment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String?
+  author    User?    @relation(fields: [authorId], references: [id], onDelete: SetNull)
+  body      String
+  createdAt DateTime @default(now())
+  @@index([taskId, createdAt])
 }
 
 model StatusHistory {
@@ -481,4 +568,154 @@ model AuditEvent {
   createdAt      DateTime @default(now())
   @@index([entityType, entityId, createdAt])
   @@index([createdAt])
+}
+
+enum IntakeStatus {
+  DRAFT
+  SENT
+  IN_PROGRESS
+  SUBMITTED
+  UNDER_REVIEW
+  CONVERTED
+  CANCELLED
+}
+
+enum IntakeKind {
+  PROVIDER
+  PRACTICE
+  FACILITY
+  ORGANIZATION
+  COMBINED
+}
+
+model IntakeRequest {
+  id               String       @id @default(cuid())
+  referenceNo      String       @unique
+  kind             IntakeKind   @default(PROVIDER)
+  status           IntakeStatus @default(DRAFT)
+  organizationId   String?
+  organization     Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  assignedToId     String?
+  assignedTo       User?        @relation("IntakeAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  createdById      String?
+  createdBy        User?        @relation("IntakeCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  contactName      String?
+  contactEmail     String?
+  contactPhone     String?
+  payload          Json?
+  missingFields    Json?
+  convertedProviderId  String?
+  convertedPracticeId  String?
+  convertedFacilityId  String?
+  convertedOrganizationId String?
+  sentAt           DateTime?
+  submittedAt      DateTime?
+  reviewedAt       DateTime?
+  convertedAt      DateTime?
+  notes            String?
+  events           IntakeEvent[]
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+  @@index([status, createdAt])
+  @@index([organizationId, status])
+  @@index([assignedToId, status])
+}
+
+model IntakeEvent {
+  id        String   @id @default(cuid())
+  intakeId  String
+  intake    IntakeRequest @relation(fields: [intakeId], references: [id], onDelete: Cascade)
+  action    String
+  actorId   String?
+  detail    Json?
+  createdAt DateTime @default(now())
+  @@index([intakeId, createdAt])
+}
+
+enum LeaveStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  CANCELLED
+}
+
+model LeaveType {
+  id          String   @id @default(cuid())
+  name        String   @unique
+  code        String?  @unique
+  paid        Boolean  @default(true)
+  annualDays  Decimal? @db.Decimal(5, 2)
+  active      Boolean  @default(true)
+  requests    LeaveRequest[]
+  balances    LeaveBalance[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model LeaveRequest {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation("LeaveApplicant", fields: [userId], references: [id], onDelete: Cascade)
+  leaveTypeId  String
+  leaveType    LeaveType   @relation(fields: [leaveTypeId], references: [id], onDelete: Restrict)
+  startDate    DateTime
+  endDate      DateTime
+  reason       String?
+  status       LeaveStatus @default(PENDING)
+  reviewedById String?
+  reviewedBy   User?       @relation("LeaveReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  reviewedAt   DateTime?
+  reviewNote   String?
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+  @@index([userId, startDate])
+  @@index([status, startDate])
+}
+
+model LeaveBalance {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  leaveTypeId String
+  leaveType   LeaveType @relation(fields: [leaveTypeId], references: [id], onDelete: Cascade)
+  year        Int
+  entitled    Decimal   @db.Decimal(5, 2)
+  used        Decimal   @db.Decimal(5, 2) @default(0)
+  @@unique([userId, leaveTypeId, year])
+  @@index([userId, year])
+}
+
+model AttendanceRecord {
+  id            String    @id @default(cuid())
+  userId        String
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workDate      DateTime  @db.Date
+  checkInAt     DateTime?
+  checkOutAt    DateTime?
+  breakMinutes  Int       @default(0)
+  lateMinutes   Int       @default(0)
+  earlyMinutes  Int       @default(0)
+  workedMinutes Int?
+  notes         String?
+  corrected     Boolean   @default(false)
+  correctionNote String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  @@unique([userId, workDate])
+  @@index([workDate])
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?
+  type      String?
+  entityType String?
+  entityId  String?
+  href      String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+  @@index([userId, readAt, createdAt])
 }

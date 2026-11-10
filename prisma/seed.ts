@@ -131,8 +131,27 @@ async function main() {
   ];
   for (const a of auditData) await prisma.auditEvent.upsert({ where: { id: a.id }, update: a, create: a });
 
+  const leaveTypes = [
+    { id: 'seed-leave-annual', name: 'Annual Leave', code: 'ANNUAL', paid: true, annualDays: 15 },
+    { id: 'seed-leave-sick', name: 'Sick Leave', code: 'SICK', paid: true, annualDays: 10 },
+    { id: 'seed-leave-unpaid', name: 'Unpaid Leave', code: 'UNPAID', paid: false, annualDays: 0 }
+  ];
+  for (const lt of leaveTypes) {
+    await prisma.leaveType.upsert({ where: { id: lt.id }, update: lt, create: { ...lt, active: true } });
+  }
+  const year = new Date().getFullYear();
+  for (const u of users) {
+    for (const lt of leaveTypes) {
+      await prisma.leaveBalance.upsert({
+        where: { userId_leaveTypeId_year: { userId: u.id, leaveTypeId: lt.id, year } },
+        update: { entitled: lt.annualDays },
+        create: { userId: u.id, leaveTypeId: lt.id, year, entitled: lt.annualDays, used: 0 }
+      });
+    }
+  }
+
   console.log('Seed complete. Synthetic demo data created/updated:');
-  console.log('- 5 users, organizations, practices, facilities, providers, licenses, documents, credentialing cases, payers, plans, enrollments, tasks, and audit events.');
+  console.log('- 5 users, organizations, practices, facilities, providers, licenses, documents, credentialing cases, payers, plans, enrollments, tasks, audit events, leave types/balances.');
   console.log(`Local demo password for all seeded users: ${SEED_PASSWORD}`);
   console.log('All names, identifiers, contact details, documents, and payer outcomes are synthetic test data. Do not use as real credentialing evidence.');
 }

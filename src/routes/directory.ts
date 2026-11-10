@@ -5,6 +5,16 @@ import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
 import { assertOwnershipWithinLimit, ownershipSummary } from '../services/ownership';
+import { assertResourceRecordAccess } from '../services/orgAccess';
+
+const facilityProviderSelect = {
+  id: true,
+  firstName: true,
+  lastName: true,
+  npi: true,
+  status: true,
+  primarySpecialty: true
+} as const;
 
 const router = Router();
 
@@ -179,17 +189,46 @@ router.delete('/practice-owners/:id', async (req: AuthRequest, res: Response, ne
 
 router.get('/facilities/:id/detail', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id);
     const facility = await prisma.facility.findUnique({
       where: { id: req.params.id },
       include: {
         practice: { select: { id: true, name: true, organizationId: true } },
         organization: { select: { id: true, legalName: true } },
         contacts: { orderBy: { createdAt: 'asc' } },
-        providers: { include: { provider: { select: { id: true, firstName: true, lastName: true, npi: true, status: true } } } }
+        providers: {
+          orderBy: [{ provider: { lastName: 'asc' } }, { provider: { firstName: 'asc' } }],
+          include: { provider: { select: facilityProviderSelect } }
+        }
       }
     });
     if (!facility) return res.status(404).json({ error: 'Facility not found' });
     res.json(facility);
+  } catch (e) { next(e); }
+});
+
+/** Lightweight facility-scoped provider list (same ProviderFacility join as detail). */
+router.get('/facilities/:id/providers', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id);
+    const facility = await prisma.facility.findUnique({
+      where: { id: req.params.id },
+      select: { id: true }
+    });
+    if (!facility) return res.status(404).json({ error: 'Facility not found' });
+    const rows = await prisma.providerFacility.findMany({
+      where: { facilityId: facility.id },
+      orderBy: [{ provider: { lastName: 'asc' } }, { provider: { firstName: 'asc' } }],
+      include: { provider: { select: facilityProviderSelect } }
+    });
+    res.json(rows.map(row => ({
+      providerId: row.providerId,
+      facilityId: row.facilityId,
+      approvalStatus: row.approvalStatus,
+      effectiveAt: row.effectiveAt,
+      endAt: row.endAt,
+      provider: row.provider
+    })));
   } catch (e) { next(e); }
 });
 
@@ -263,6 +302,7 @@ router.post('/provider-facilities', async (req: AuthRequest, res: Response, next
       effectiveAt: z.coerce.date().optional().nullable(),
       endAt: z.coerce.date().optional().nullable()
     }).parse(req.body);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', data.facilityId);
     const provider = await prisma.provider.findUnique({ where: { id: data.providerId }, select: { id: true } });
     if (!provider) return res.status(400).json({ error: 'Provider not found' });
     const facility = await prisma.facility.findUnique({ where: { id: data.facilityId }, select: { id: true } });
@@ -271,7 +311,10 @@ router.post('/provider-facilities', async (req: AuthRequest, res: Response, next
       where: { providerId_facilityId: { providerId: data.providerId, facilityId: data.facilityId } },
       update: { approvalStatus: data.approvalStatus || undefined, effectiveAt: data.effectiveAt || undefined, endAt: data.endAt || undefined },
       create: { providerId: data.providerId, facilityId: data.facilityId, approvalStatus: data.approvalStatus || 'Pending', effectiveAt: data.effectiveAt || new Date(), endAt: data.endAt || null },
-      include: { provider: { select: { id: true, firstName: true, lastName: true, npi: true, status: true } }, facility: { select: { id: true, name: true } } }
+      include: {
+        provider: { select: facilityProviderSelect },
+        facility: { select: { id: true, name: true } }
+      }
     });
     await audit(req, 'CREATE', 'providerFacilities', `${data.providerId}:${data.facilityId}`, undefined, row);
     res.status(201).json(row);
@@ -283,6 +326,7 @@ router.delete('/provider-facilities/:providerId/:facilityId', async (req: AuthRe
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.facilityId);
     const before = await prisma.providerFacility.findUnique({
       where: { providerId_facilityId: { providerId: req.params.providerId, facilityId: req.params.facilityId } }
     });

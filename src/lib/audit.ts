@@ -5,7 +5,7 @@ function redact(value: any): any {
   if (!value || typeof value !== 'object' || value instanceof Date) return value;
   const output: Record<string, any> = {};
   for (const [key, item] of Object.entries(value)) {
-    if (/^(ssn|bankAccountNumber|bankRoutingNumber|passwordHash)$/i.test(key)) output[key] = '[REDACTED]';
+    if (/^(ssn|bankAccountNumber|bankRoutingNumber|bankPhoneNumber|bankTitle|bankAccountHolder|passwordHash|policyNumber|perOccurrence|aggregate|storageKey|signedUrl)$/i.test(key)) output[key] = '[REDACTED]';
     else output[key] = redact(item);
   }
   return output;

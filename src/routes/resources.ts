@@ -4,6 +4,10 @@ import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest, allowRoles } from '../middleware/auth';
 import { Role } from '@prisma/client';
+import { assertCaseTransition, assertEnrollmentTransition, allowedCaseTransitions, daysConsumed } from '../services/workflow';
+import { assertResourceRecordAccess } from '../services/orgAccess';
+import { profileCompletion } from '../services/profileCompletion';
+import { notifyUser } from '../services/notifications';
 
 const router = Router();
 function sanitizeRow(row: any, role: Role, resource: string) {
@@ -21,6 +25,12 @@ function sanitizeRow(row: any, role: Role, resource: string) {
     delete copy.bankRoutingNumber;
     if (role !== Role.CREDENTIALING_MANAGER) delete copy.taxId;
   }
+  if (resource === 'documents' && role !== Role.CREDENTIALING_MANAGER) {
+    if (copy.bankRoutingNumber) {
+      const digits = String(copy.bankRoutingNumber).replace(/\D/g, '');
+      copy.bankRoutingNumber = digits.length >= 4 ? `••••${digits.slice(-4)}` : '[REDACTED]';
+    }
+  }
   return copy;
 }
 router.get('/audit', async (req, res, next) => { try { const organizationId = String(req.query.organizationId || '').trim(); const rows = await prisma.auditEvent.findMany({ where: organizationId ? { organizationId } : {}, select: { id: true, action: true, entityType: true, entityId: true, ipAddress: true, createdAt: true, actor: { select: { name: true, email: true } } }, orderBy: { createdAt: 'desc' }, take: 200 }); res.json(rows); } catch (e) { next(e); } });
@@ -31,12 +41,12 @@ const schemas: Record<string, z.ZodTypeAny> = {
   providers: z.object({ firstName: z.string().min(1), middleName: z.string().optional().nullable(), lastName: z.string().min(1), npi: z.string().optional().nullable(), dateOfBirth: z.coerce.date().optional().nullable(), placeOfBirth: z.string().optional().nullable(), ssn: z.string().optional().nullable(), citizenship: z.string().optional().nullable(), gender: z.string().optional().nullable(), email: z.string().email().optional().or(z.literal('')).nullable(), homePhone: z.string().optional().nullable(), workPhone: z.string().optional().nullable(), address: z.any().optional(), primarySpecialty: z.string().optional().nullable(), secondarySpecialty: z.string().optional().nullable(), taxonomyCode: z.string().optional().nullable(), professionalType: z.string().optional().nullable(), supervisorName: z.string().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   providerOrganizations: z.object({ providerId: z.string().min(1), organizationId: z.string().min(1), affiliationTitle: z.string().optional().nullable(), effectiveAt: z.coerce.date().optional().nullable(), endAt: z.coerce.date().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   licenses: z.object({ providerId: z.string().min(1), type: z.string().min(1), number: z.string().optional().nullable(), state: z.string().optional().nullable(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), issuingBody: z.string().optional().nullable(), notes: z.string().optional().nullable() }),
-  documents: z.object({ title: z.string().min(1), type: z.string().min(1), category: z.string().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), storageKey: z.string().optional().nullable(), originalName: z.string().optional().nullable(), mimeType: z.string().optional().nullable(), sizeBytes: z.number().int().nonnegative().optional().nullable(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), verifiedAt: z.coerce.date().optional().nullable(), verifiedBy: z.string().optional().nullable(), notes: z.string().optional().nullable(), ignored: z.boolean().optional(), required: z.boolean().optional(), reportingRequired: z.boolean().optional(), warningDays: z.coerce.number().int().positive().optional().nullable(), providerId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), facilityId: z.string().optional().nullable() }),
+  documents: z.object({ title: z.string().min(1), type: z.string().min(1), category: z.string().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), storageKey: z.string().optional().nullable(), originalName: z.string().optional().nullable(), mimeType: z.string().optional().nullable(), sizeBytes: z.number().int().nonnegative().optional().nullable(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), verifiedAt: z.coerce.date().optional().nullable(), verifiedBy: z.string().optional().nullable(), notes: z.string().optional().nullable(), ignored: z.boolean().optional(), required: z.boolean().optional(), reportingRequired: z.boolean().optional(), warningDays: z.coerce.number().int().positive().optional().nullable(), policyNumber: z.string().optional().nullable(), perOccurrence: z.coerce.number().nonnegative().optional().nullable(), aggregate: z.coerce.number().nonnegative().optional().nullable(), insuranceCompany: z.string().optional().nullable(), namedInsured: z.string().optional().nullable(), bankName: z.string().optional().nullable(), bankTitle: z.string().optional().nullable(), bankRoutingNumber: z.string().optional().nullable(), bankAccountType: z.enum(['Checking','Savings','Other']).optional().nullable(), bankPhoneNumber: z.string().optional().nullable(), bankAccountHolder: z.string().optional().nullable(), providerId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), facilityId: z.string().optional().nullable() }),
   cases: z.object({ caseNumber: z.string().min(1), providerId: z.string().min(1), practiceId: z.string().optional().nullable(), status: z.enum(['DRAFT','INFORMATION_NEEDED','UNDER_REVIEW','VERIFICATION_PENDING','READY_FOR_APPROVAL','APPROVED','REJECTED','ON_HOLD']).optional(), assignedTo: z.string().optional().nullable(), dueAt: z.coerce.date().optional().nullable(), submittedAt: z.coerce.date().optional().nullable(), decisionAt: z.coerce.date().optional().nullable(), decisionBy: z.string().optional().nullable(), decisionReason: z.string().optional().nullable(), checklist: z.any().optional(), notes: z.string().optional().nullable() }),
   payers: z.object({ name: z.string().min(2), payerCode: z.string().optional().nullable(), website: z.string().optional().nullable(), phone: z.string().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   plans: z.object({ payerId: z.string().min(1), name: z.string().min(1), planType: z.string().optional().nullable(), checklist: z.any().optional() }),
   enrollments: z.object({ applicationNo: z.string().min(1), providerId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), facilityId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), payerPlanId: z.string().min(1), status: z.enum(['NOT_STARTED','PREPARING','READY_TO_SUBMIT','SUBMITTED','PAYER_REVIEW','ADDITIONAL_INFORMATION_NEEDED','APPROVED','DENIED','WITHDRAWN']).optional(), assignedTo: z.string().optional().nullable(), dueAt: z.coerce.date().optional().nullable(), submittedAt: z.coerce.date().optional().nullable(), referenceNo: z.string().optional().nullable(), lastFollowUpAt: z.coerce.date().optional().nullable(), nextFollowUpAt: z.coerce.date().optional().nullable(), effectiveAt: z.coerce.date().optional().nullable(), decisionAt: z.coerce.date().optional().nullable(), decisionReason: z.string().optional().nullable(), checklist: z.any().optional(), notes: z.string().optional().nullable() }),
-  tasks: z.object({ title: z.string().min(2), description: z.string().optional().nullable(), status: z.enum(['OPEN','IN_PROGRESS','BLOCKED','COMPLETED','CANCELLED']).optional(), priority: z.enum(['LOW','NORMAL','HIGH','URGENT']).optional(), dueAt: z.coerce.date().optional().nullable(), assignedToId: z.string().optional().nullable(), caseId: z.string().optional().nullable(), enrollmentId: z.string().optional().nullable() })
+  tasks: z.object({ title: z.string().min(2), description: z.string().optional().nullable(), status: z.enum(['OPEN','IN_PROGRESS','BLOCKED','COMPLETED','CANCELLED']).optional(), priority: z.enum(['LOW','NORMAL','HIGH','URGENT']).optional(), dueAt: z.coerce.date().optional().nullable(), assignedToId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), facilityId: z.string().optional().nullable(), providerId: z.string().optional().nullable(), caseId: z.string().optional().nullable(), enrollmentId: z.string().optional().nullable() })
 };
 const delegates: Record<string, any> = { employees: prisma.user, organizations: prisma.organization, practices: prisma.practice, facilities: prisma.facility, providers: prisma.provider, providerOrganizations: prisma.providerOrganization, licenses: prisma.license, documents: prisma.document, cases: prisma.credentialingCase, payers: prisma.payer, plans: prisma.payerPlan, enrollments: prisma.enrollmentApplication, tasks: prisma.task };
 const includes: Record<string, any> = {
@@ -46,9 +56,9 @@ const includes: Record<string, any> = {
   providers: { licenses: true, organizations: { include: { organization: true } }, practices: { include: { practice: true } }, facilities: { include: { facility: true } } },
   licenses: { provider: { select: { id: true, firstName: true, lastName: true } } },
   documents: { provider: { select: { id: true, firstName: true, lastName: true } }, organization: { select: { id: true, legalName: true } }, practice: { select: { id: true, name: true } }, facility: { select: { id: true, name: true } } },
-  cases: { provider: { select: { id: true, firstName: true, lastName: true, npi: true } }, practice: { select: { id: true, name: true } } },
-  plans: { payer: { select: { id: true, name: true } } }, enrollments: { provider: { select: { id: true, firstName: true, lastName: true, npi: true } }, organization: { select: { id: true, legalName: true } }, facility: { select: { id: true, name: true } }, practice: { select: { id: true, name: true } }, payerPlan: { include: { payer: true } } },
-  tasks: { assignedTo: { select: { id: true, name: true, email: true } }, credentialingCase: { select: { id: true, caseNumber: true } }, enrollment: { select: { id: true, applicationNo: true } } }
+  cases: { provider: { select: { id: true, firstName: true, lastName: true, npi: true } }, practice: { select: { id: true, name: true } }, statusHistory: { orderBy: { createdAt: 'desc' }, take: 30 } },
+  plans: { payer: { select: { id: true, name: true } } }, enrollments: { provider: { select: { id: true, firstName: true, lastName: true, npi: true } }, organization: { select: { id: true, legalName: true } }, facility: { select: { id: true, name: true } }, practice: { select: { id: true, name: true } }, payerPlan: { include: { payer: true } }, statusHistory: { orderBy: { createdAt: 'desc' }, take: 30 } },
+  tasks: { assignedTo: { select: { id: true, name: true, email: true } }, organization: { select: { id: true, legalName: true } }, practice: { select: { id: true, name: true } }, facility: { select: { id: true, name: true } }, provider: { select: { id: true, firstName: true, lastName: true } }, credentialingCase: { select: { id: true, caseNumber: true } }, enrollment: { select: { id: true, applicationNo: true } }, comments: { include: { author: { select: { id: true, name: true } } }, orderBy: { createdAt: 'asc' }, take: 20 } }
 };
 const mapPath: Record<string,string> = { cases: 'credentialingCase', plans: 'payerPlan' };
 function cleanData(data: any) { const out = { ...data }; for (const k of Object.keys(out)) if (out[k] === '') out[k] = null; return out; }
@@ -126,7 +136,27 @@ router.get('/:resource', async (req: Request, res: Response, next: NextFunction)
 
       if (scoped[resource]) where = Object.keys(where).length ? { AND: [where, scoped[resource]] } : scoped[resource];
     }
-    const rows = await model.findMany({ where, include: includes[resource], orderBy: { createdAt: 'desc' }, take }); res.json(rows.map((row: any) => { if (resource === 'employees') { const { passwordHash, ...safe } = row; return safe; } return sanitizeRow(row, (req as AuthRequest).user!.role, resource); }));
+    const pageParam = req.query.page;
+    const wantsPagination = pageParam !== undefined && String(pageParam).length > 0;
+    const page = Math.max(1, Number(pageParam) || 1);
+    const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || take));
+    const orderBy = { createdAt: 'desc' as const };
+    if (wantsPagination) {
+      const [total, rows] = await Promise.all([
+        model.count({ where }),
+        model.findMany({ where, include: includes[resource], orderBy, skip: (page - 1) * pageSize, take: pageSize })
+      ]);
+      const data = rows.map((row: any) => {
+        if (resource === 'employees') { const { passwordHash, ...safe } = row; return safe; }
+        return sanitizeRow(row, (req as AuthRequest).user!.role, resource);
+      });
+      return res.json({ data, total, page, pageSize });
+    }
+    const rows = await model.findMany({ where, include: includes[resource], orderBy, take });
+    res.json(rows.map((row: any) => {
+      if (resource === 'employees') { const { passwordHash, ...safe } = row; return safe; }
+      return sanitizeRow(row, (req as AuthRequest).user!.role, resource);
+    }));
   } catch (e) { next(e); }
 });
 router.get('/:resource/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -135,8 +165,23 @@ router.get('/:resource/:id', async (req: AuthRequest, res: Response, next: NextF
     if (!model) return res.status(404).json({ error: 'Unknown resource' });
     const row = await model.findUnique({ where: { id: req.params.id }, include: includes[resource] });
     if (!row) return res.status(404).json({ error: 'Record not found' });
+    try {
+      await assertResourceRecordAccess(req.user!.id, req.user!.role, resource, req.params.id);
+    } catch (accessErr: any) {
+      if (accessErr?.status) return res.status(accessErr.status).json({ error: accessErr.message });
+      throw accessErr;
+    }
     if (resource === 'employees') { const { passwordHash, ...safe } = row as any; return res.json(safe); }
-    res.json(sanitizeRow(row, req.user!.role, resource));
+    let out: any = sanitizeRow(row, req.user!.role, resource);
+    if (resource === 'cases') out = { ...out, allowedTransitions: allowedCaseTransitions(row.status, req.user!.role) };
+    if (resource === 'enrollments') {
+      out = { ...out, daysConsumed: daysConsumed(row.submittedAt || row.createdAt) };
+    }
+    const completionMap: Record<string, 'organization' | 'practice' | 'facility' | 'provider'> = {
+      organizations: 'organization', practices: 'practice', facilities: 'facility', providers: 'provider'
+    };
+    if (completionMap[resource]) out = { ...out, completion: profileCompletion(completionMap[resource], row) };
+    res.json(out);
   } catch (e) { next(e); }
 });
 router.post('/:resource', async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -180,10 +225,28 @@ router.patch('/:resource/:id', async (req: AuthRequest, res: Response, next: Nex
     }
     if (('ssn' in data || 'bankAccountNumber' in data || 'bankRoutingNumber' in data) && !([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify sensitive identifiers or banking details' });
     const before = await model.findUnique({ where: { id: req.params.id } }); if (!before) return res.status(404).json({ error: 'Record not found' });
-    if ((resource === 'cases' && ['APPROVED','REJECTED'].includes(data.status)) || (resource === 'enrollments' && ['APPROVED','DENIED'].includes(data.status))) { if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER, Role.APPROVER] as Role[]).includes(req.user!.role)) return res.status(403).json({ error: 'Only an authorized approver can finalize this workflow' }); }
+    try {
+      await assertResourceRecordAccess(req.user!.id, req.user!.role, resource, req.params.id);
+      if (resource === 'cases' && data.status && data.status !== before.status) assertCaseTransition(before.status, data.status, req.user!.role);
+      if (resource === 'enrollments' && data.status && data.status !== before.status) assertEnrollmentTransition(before.status, data.status, req.user!.role);
+    } catch (accessErr: any) {
+      if (accessErr?.status) return res.status(accessErr.status).json({ error: accessErr.message });
+      throw accessErr;
+    }
     const row = await model.update({ where: { id: req.params.id }, data, include: includes[resource] });
     if (resource === 'cases' && data.status && data.status !== before.status) await prisma.statusHistory.create({ data: { caseId: row.id, fromStatus: before.status, toStatus: data.status, changedBy: req.user!.id, reason: data.decisionReason || 'Status updated' } });
     if (resource === 'enrollments' && data.status && data.status !== before.status) await prisma.statusHistory.create({ data: { enrollmentId: row.id, fromStatus: before.status, toStatus: data.status, changedBy: req.user!.id, reason: data.decisionReason || 'Status updated' } });
+    if (resource === 'tasks' && data.assignedToId && data.assignedToId !== before.assignedToId) {
+      await notifyUser({
+        userId: data.assignedToId,
+        title: 'Task assigned',
+        body: row.title,
+        type: 'task',
+        entityType: 'tasks',
+        entityId: row.id,
+        href: '/tasks'
+      });
+    }
     await audit(req, 'UPDATE', resource, row.id, before, row);
     res.json(sanitizeRow(row, req.user!.role, resource));
   } catch (e) { next(e); }
