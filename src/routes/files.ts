@@ -11,6 +11,7 @@ import {
   isAgreementsCategory,
   isBankingCredentialType,
   isInsuranceLiabilityType,
+  isIrsCategory,
   isOtherDocumentsCategory
 } from '../services/credentials';
 import { extractInsuranceFromFile } from '../services/insuranceExtract';
@@ -20,6 +21,7 @@ import {
   BANKING_ALLOWED_MIME,
   GENERAL_ALLOWED_MIME,
   INSURANCE_ALLOWED_MIME,
+  IRS_ALLOWED_MIME,
   OTHER_DOCUMENTS_ALLOWED_MIME,
   validateUploadedFile
 } from '../services/fileMagic';
@@ -78,13 +80,16 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
     const banking = isBankingCredentialType(document.type) || document.category === 'banking';
     const otherDocs = isOtherDocumentsCategory(document.category);
     const agreements = isAgreementsCategory(document.category);
+    const irs = isIrsCategory(document.category);
     const allowed = otherDocs
       ? OTHER_DOCUMENTS_ALLOWED_MIME
       : agreements
         ? AGREEMENTS_ALLOWED_MIME
-        : insurance || banking
-          ? (banking ? BANKING_ALLOWED_MIME : INSURANCE_ALLOWED_MIME)
-          : GENERAL_ALLOWED_MIME;
+        : irs
+          ? IRS_ALLOWED_MIME
+          : insurance || banking
+            ? (banking ? BANKING_ALLOWED_MIME : INSURANCE_ALLOWED_MIME)
+            : GENERAL_ALLOWED_MIME;
     const validation = validateUploadedFile({
       filePath: req.file.path,
       originalName: req.file.originalname,

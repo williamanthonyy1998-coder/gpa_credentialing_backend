@@ -4,10 +4,11 @@ import {
   DOCUMENT_CATEGORIES,
   computeCredentialAttention,
   isAgreementsCategory,
+  isIrsCategory,
   isOtherDocumentsCategory
 } from './credentials';
 import { extractInsuranceFieldsFromText } from './insuranceExtract';
-import { AGREEMENTS_ALLOWED_MIME, OTHER_DOCUMENTS_ALLOWED_MIME } from './fileMagic';
+import { AGREEMENTS_ALLOWED_MIME, IRS_ALLOWED_MIME, OTHER_DOCUMENTS_ALLOWED_MIME } from './fileMagic';
 
 test('Other Documents category is listed directly below Portals', () => {
   const keys = DOCUMENT_CATEGORIES.map(c => c.key);
@@ -41,6 +42,20 @@ test('Agreements & Contracts category and MIME allowlist', () => {
   assert.equal(AGREEMENTS_ALLOWED_MIME.has('image/jpeg'), true);
   assert.equal(AGREEMENTS_ALLOWED_MIME.has('image/png'), true);
   assert.equal(AGREEMENTS_ALLOWED_MIME.has('application/msword'), false);
+});
+
+test('IRS Documents category includes W-9 and secure MIME allowlist', () => {
+  const irs = DOCUMENT_CATEGORIES.find(c => c.key === 'irs');
+  assert.ok(irs, 'irs category missing');
+  assert.equal(irs.label, 'IRS Documents');
+  assert.ok(irs.types.some(t => t.type === 'W-9 Form'));
+  assert.ok(irs.types.some(t => t.type === 'IRS CP-575 / EIN Letter'));
+  assert.equal(isIrsCategory('irs'), true);
+  assert.equal(isIrsCategory('agreements'), false);
+  assert.equal(IRS_ALLOWED_MIME.has('application/pdf'), true);
+  assert.equal(IRS_ALLOWED_MIME.has('image/jpeg'), true);
+  assert.equal(IRS_ALLOWED_MIME.has('image/png'), true);
+  assert.equal(IRS_ALLOWED_MIME.has('application/msword'), false);
 });
 
 test('ignored credentials return IGNORED and are not missing/expired', () => {

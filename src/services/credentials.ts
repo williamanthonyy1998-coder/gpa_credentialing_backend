@@ -86,6 +86,7 @@ export const DOCUMENT_CATEGORIES = [
 
 export const OTHER_DOCUMENTS_CATEGORY = 'other' as const;
 export const AGREEMENTS_CATEGORY = 'agreements' as const;
+export const IRS_CATEGORY = 'irs' as const;
 
 export function isOtherDocumentsCategory(category?: string | null): boolean {
   return category === OTHER_DOCUMENTS_CATEGORY;
@@ -93,6 +94,10 @@ export function isOtherDocumentsCategory(category?: string | null): boolean {
 
 export function isAgreementsCategory(category?: string | null): boolean {
   return category === AGREEMENTS_CATEGORY;
+}
+
+export function isIrsCategory(category?: string | null): boolean {
+  return category === IRS_CATEGORY;
 }
 
 export type AttentionStatus = 'MISSING' | 'AVAILABLE' | 'EXPIRING_SOON' | 'EXPIRED' | 'IGNORED';

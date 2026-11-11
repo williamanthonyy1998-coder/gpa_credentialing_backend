@@ -7,7 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "seed": "tsx prisma/seed.ts",
-    "test": "tsx --test src/services/workflow.test.ts src/services/profileCompletion.test.ts src/services/intakeConvert.test.ts src/services/credentials.attention.test.ts src/services/fileMagic.test.ts src/services/bankingValidation.test.ts src/services/facilityProviders.test.ts",
+    "test": "tsx --test src/services/workflow.test.ts src/services/profileCompletion.test.ts src/services/intakeConvert.test.ts src/services/credentials.attention.test.ts src/services/fileMagic.test.ts src/services/bankingValidation.test.ts src/services/facilityProviders.test.ts src/services/enrollments.test.ts src/services/enrollmentActivity.test.ts",
     "smoke": "tsx scripts/smoke-api.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",

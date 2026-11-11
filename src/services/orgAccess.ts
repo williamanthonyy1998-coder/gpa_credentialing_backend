@@ -80,13 +80,24 @@ export async function resolveRecordOrganizationId(resource: string, id: string):
         select: {
           organizationId: true,
           practice: { select: { organizationId: true } },
-          facility: { select: { organizationId: true, practice: { select: { organizationId: true } } } }
+          facility: { select: { organizationId: true, practice: { select: { organizationId: true } } } },
+          enrollment: {
+            select: {
+              organizationId: true,
+              practice: { select: { organizationId: true } },
+              facility: { select: { organizationId: true, practice: { select: { organizationId: true } } } }
+            }
+          }
         }
       });
       return row?.organizationId
         || row?.practice?.organizationId
         || row?.facility?.organizationId
         || row?.facility?.practice?.organizationId
+        || row?.enrollment?.organizationId
+        || row?.enrollment?.practice?.organizationId
+        || row?.enrollment?.facility?.organizationId
+        || row?.enrollment?.facility?.practice?.organizationId
         || null;
     }
     case 'tasks': {

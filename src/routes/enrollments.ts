@@ -7,25 +7,59 @@ import { AuthRequest, allowRoles } from '../middleware/auth';
 import { assertEnrollmentTransition, allowedEnrollmentTransitions, daysConsumed } from '../services/workflow';
 import { getAuthorizedOrganizationIds } from '../services/orgAccess';
 import { notifyUser } from '../services/notifications';
+import {
+  AssigneeUser,
+  enrollmentAssigneeDisplayName,
+  enrollmentFacilityDisplayName,
+  enrollmentProviderDisplayName,
+  enrollmentSubjectDisplay,
+  generateApplicationNo,
+  loadAssigneeMap,
+  resolveEnrollmentLinks
+} from '../services/enrollments';
+import {
+  ensureOverdueFollowUpNotifications,
+  notifyEnrollmentStakeholders,
+  unreadActivityCountForUser
+} from '../services/enrollmentActivity';
+import enrollmentActivityRoutes from './enrollmentActivity';
 
 const router = Router();
 
 const enrollmentInclude = {
   provider: { select: { id: true, firstName: true, lastName: true, npi: true } },
-  organization: { select: { id: true, legalName: true } },
+  organization: { select: { id: true, legalName: true, dba: true } },
   facility: { select: { id: true, name: true } },
   practice: { select: { id: true, name: true } },
   payerPlan: { include: { payer: true } },
-  statusHistory: { orderBy: { createdAt: 'desc' as const }, take: 50 }
+  statusHistory: { orderBy: { createdAt: 'desc' as const }, take: 50 },
+  approvalDetails: {
+    include: {
+      createdBy: { select: { id: true, name: true, email: true } },
+      updatedBy: { select: { id: true, name: true, email: true } }
+    }
+  }
 };
 
-function enrich(row: any, role: Role) {
+function enrich(row: any, role: Role, usersByEmail?: Map<string, AssigneeUser>, extras?: { unreadActivityCount?: number }) {
   if (!row) return row;
   const start = row.submittedAt || row.createdAt;
+  const assigneeKey = String(row.assignedTo || '').trim().toLowerCase();
+  const assignedToUser = assigneeKey && usersByEmail?.get(assigneeKey) ? usersByEmail.get(assigneeKey)! : null;
   return {
     ...row,
+    subjectDisplay: enrollmentSubjectDisplay(row),
+    facilityName: enrollmentFacilityDisplayName(row),
+    providerName: enrollmentProviderDisplayName(row),
+    payerName: row.payerPlan?.payer?.name || null,
+    planName: row.payerPlan?.name || null,
     daysConsumed: daysConsumed(start),
-    allowedTransitions: allowedEnrollmentTransitions(row.status, role)
+    highlighted: Boolean(row.highlighted),
+    assigneeName: enrollmentAssigneeDisplayName(row.assignedTo, usersByEmail),
+    assignedToUser,
+    allowedTransitions: allowedEnrollmentTransitions(row.status, role),
+    unreadActivityCount: extras?.unreadActivityCount ?? row.unreadActivityCount ?? 0,
+    hasApprovalDetails: Boolean(row.approvalDetails?.id || row.referenceNo || row.effectiveAt)
   };
 }
 
@@ -37,10 +71,15 @@ function buildWhere(query: any, userEmail: string, orgIds: string[] | null) {
     and.push({
       OR: [
         { applicationNo: { contains: q, mode: 'insensitive' } },
+        { subject: { contains: q, mode: 'insensitive' } },
         { referenceNo: { contains: q, mode: 'insensitive' } },
         { assignedTo: { contains: q, mode: 'insensitive' } },
+        { notes: { contains: q, mode: 'insensitive' } },
         { provider: { is: { OR: [{ firstName: { contains: q, mode: 'insensitive' } }, { lastName: { contains: q, mode: 'insensitive' } }, { npi: { contains: q } }] } } },
-        { organization: { is: { legalName: { contains: q, mode: 'insensitive' } } } }
+        { facility: { is: { name: { contains: q, mode: 'insensitive' } } } },
+        { practice: { is: { name: { contains: q, mode: 'insensitive' } } } },
+        { organization: { is: { legalName: { contains: q, mode: 'insensitive' } } } },
+        { payerPlan: { is: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { payer: { is: { name: { contains: q, mode: 'insensitive' } } } }] } } }
       ]
     });
   }
@@ -81,8 +120,11 @@ function buildWhere(query: any, userEmail: string, orgIds: string[] | null) {
   return where;
 }
 
+router.use(enrollmentActivityRoutes);
+
 router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    await ensureOverdueFollowUpNotifications(req.user!.email, req.user!.id).catch(() => {});
     const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
     const base = buildWhere(req.query, req.user!.email, orgIds);
     const statuses = Object.values(EnrollmentStatus);
@@ -125,8 +167,10 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         take: pageSize
       })
     ]);
+    const usersByEmail = await loadAssigneeMap(rows.map(r => r.assignedTo));
+    const unreadCounts = await Promise.all(rows.map(r => unreadActivityCountForUser(r.id, req.user!.id)));
     res.json({
-      data: rows.map(r => enrich(r, req.user!.role)),
+      data: rows.map((r, i) => enrich(r, req.user!.role, usersByEmail, { unreadActivityCount: unreadCounts[i] })),
       total,
       page,
       pageSize
@@ -140,12 +184,15 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       return res.status(403).json({ error: 'Your role cannot create enrollments' });
     }
     const schema = z.object({
-      applicationNo: z.string().min(1),
+      // applicationNo is generated server-side; ignore client-supplied values
+      applicationNo: z.string().optional().nullable(),
+      subject: z.string().optional().nullable(),
+      payerId: z.string().optional().nullable(),
       providerId: z.string().optional().nullable(),
       organizationId: z.string().optional().nullable(),
-      facilityId: z.string().optional().nullable(),
+      facilityId: z.string().min(1, 'Facility is required'),
       practiceId: z.string().optional().nullable(),
-      payerPlanId: z.string().min(1),
+      payerPlanId: z.string().min(1, 'Payer plan is required'),
       status: z.nativeEnum(EnrollmentStatus).optional(),
       assignedTo: z.string().optional().nullable(),
       dueAt: z.coerce.date().optional().nullable(),
@@ -155,45 +202,61 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       nextFollowUpAt: z.coerce.date().optional().nullable(),
       effectiveAt: z.coerce.date().optional().nullable(),
       notes: z.string().optional().nullable(),
-      checklist: z.any().optional()
+      checklist: z.any().optional(),
+      highlighted: z.boolean().optional()
     });
-    const data: any = schema.parse(req.body);
-    for (const k of Object.keys(data)) if (data[k] === '') data[k] = null;
-    if (!data.organizationId && data.providerId && !data.practiceId && !data.facilityId) {
-      const affiliations = await prisma.providerOrganization.findMany({
-        where: { providerId: data.providerId, status: 'ACTIVE', OR: [{ endAt: null }, { endAt: { gt: new Date() } }] },
-        select: { organizationId: true },
-        take: 2
-      });
-      if (affiliations.length === 1) data.organizationId = affiliations[0].organizationId;
+    const parsed: any = schema.parse(req.body);
+    for (const k of Object.keys(parsed)) if (parsed[k] === '') parsed[k] = null;
+
+    if (!parsed.payerId && !parsed.payerPlanId) {
+      return res.status(400).json({ error: 'Payer and payer plan are required' });
     }
-    if (!data.providerId && !data.organizationId && !data.practiceId && !data.facilityId) {
-      return res.status(400).json({ error: 'Enrollment must be linked to a provider, organization, practice, or facility' });
-    }
-    if (data.practiceId) {
-      const practice = await prisma.practice.findUnique({ where: { id: data.practiceId }, select: { organizationId: true } });
-      if (!practice) return res.status(400).json({ error: 'Selected practice was not found' });
-      if (data.organizationId && data.organizationId !== practice.organizationId) {
-        return res.status(400).json({ error: 'Enrollment organization must match the selected practice organization' });
-      }
-      if (!data.organizationId) data.organizationId = practice.organizationId;
-    }
-    if (data.facilityId) {
-      const facility = await prisma.facility.findUnique({
-        where: { id: data.facilityId },
-        select: { organizationId: true, practice: { select: { organizationId: true } } }
-      });
-      if (!facility) return res.status(400).json({ error: 'Selected facility was not found' });
-      const facilityOrg = facility.organizationId || facility.practice?.organizationId;
-      if (data.organizationId && facilityOrg && data.organizationId !== facilityOrg) {
-        return res.status(400).json({ error: 'Enrollment organization must match the selected facility organization' });
-      }
-      if (!data.organizationId && facilityOrg) data.organizationId = facilityOrg;
-    }
-    const row = await prisma.enrollmentApplication.create({ data, include: enrollmentInclude });
-    await prisma.statusHistory.create({
-      data: { enrollmentId: row.id, toStatus: row.status, changedBy: req.user!.id, reason: 'Enrollment created' }
+
+    const links = await resolveEnrollmentLinks({
+      facilityId: parsed.facilityId,
+      practiceId: parsed.practiceId,
+      organizationId: parsed.organizationId,
+      providerId: parsed.providerId,
+      payerPlanId: parsed.payerPlanId,
+      payerId: parsed.payerId
     });
+
+    const row = await prisma.$transaction(async (tx) => {
+      const applicationNo = await generateApplicationNo(tx);
+      const created = await tx.enrollmentApplication.create({
+        data: {
+          applicationNo,
+          subject: parsed.subject || null,
+          providerId: links.providerId,
+          organizationId: links.organizationId,
+          facilityId: links.facilityId,
+          practiceId: links.practiceId,
+          payerPlanId: links.payerPlanId,
+          status: parsed.status || EnrollmentStatus.NOT_STARTED,
+          assignedTo: parsed.assignedTo || null,
+          dueAt: parsed.dueAt || null,
+          submittedAt: parsed.submittedAt || null,
+          referenceNo: parsed.referenceNo || null,
+          lastFollowUpAt: parsed.lastFollowUpAt || null,
+          nextFollowUpAt: parsed.nextFollowUpAt || null,
+          effectiveAt: parsed.effectiveAt || null,
+          notes: parsed.notes || null,
+          checklist: parsed.checklist || undefined,
+          highlighted: Boolean(parsed.highlighted)
+        },
+        include: enrollmentInclude
+      });
+      await tx.statusHistory.create({
+        data: {
+          enrollmentId: created.id,
+          toStatus: created.status,
+          changedBy: req.user!.id,
+          reason: 'Enrollment created'
+        }
+      });
+      return created;
+    });
+
     if (row.assignedTo) {
       const assignee = await prisma.user.findFirst({ where: { email: { equals: row.assignedTo, mode: 'insensitive' } } });
       if (assignee) {
@@ -204,13 +267,17 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
           type: 'enrollment',
           entityType: 'enrollments',
           entityId: row.id,
-          href: `/enrollments?edit=${row.id}`
+          href: `/enrollments?activity=${row.id}`
         });
       }
     }
+    const usersByEmail = await loadAssigneeMap([row.assignedTo]);
     await audit(req, 'CREATE', 'enrollments', row.id, undefined, row);
-    res.status(201).json(enrich(row, req.user!.role));
-  } catch (e) { next(e); }
+    res.status(201).json(enrich(row, req.user!.role, usersByEmail));
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
 });
 
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -222,7 +289,9 @@ router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) =
       const orgId = row.organizationId || (row as any).practice?.organizationId;
       if (orgId && !orgIds.includes(orgId)) return res.status(403).json({ error: 'You do not have access to this enrollment' });
     }
-    res.json(enrich(row, req.user!.role));
+    const usersByEmail = await loadAssigneeMap([row.assignedTo]);
+    const unreadActivityCount = await unreadActivityCountForUser(row.id, req.user!.id);
+    res.json(enrich(row, req.user!.role, usersByEmail, { unreadActivityCount }));
   } catch (e) { next(e); }
 });
 
@@ -232,6 +301,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       return res.status(403).json({ error: 'Your role cannot modify enrollments' });
     }
     const schema = z.object({
+      subject: z.string().optional().nullable(),
       status: z.nativeEnum(EnrollmentStatus).optional(),
       assignedTo: z.string().optional().nullable(),
       dueAt: z.coerce.date().optional().nullable(),
@@ -240,36 +310,127 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       lastFollowUpAt: z.coerce.date().optional().nullable(),
       nextFollowUpAt: z.coerce.date().optional().nullable(),
       effectiveAt: z.coerce.date().optional().nullable(),
+      revalidationAt: z.coerce.date().optional().nullable(),
       decisionAt: z.coerce.date().optional().nullable(),
       decisionReason: z.string().optional().nullable(),
       notes: z.string().optional().nullable(),
-      checklist: z.any().optional()
+      checklist: z.any().optional(),
+      // Highlight/alert flag — must never alter status by itself
+      highlighted: z.boolean().optional(),
+      // Relationship updates are allowed but must keep facility when clearing provider
+      providerId: z.string().optional().nullable(),
+      facilityId: z.string().optional().nullable(),
+      practiceId: z.string().optional().nullable(),
+      payerPlanId: z.string().optional(),
+      payerId: z.string().optional().nullable()
     });
-    const data = schema.parse(req.body);
+    const data: any = schema.parse(req.body);
+    for (const k of Object.keys(data)) if (data[k] === '') data[k] = null;
+
     const before = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Enrollment not found' });
     if (data.status && data.status !== before.status) {
       assertEnrollmentTransition(before.status, data.status, req.user!.role);
     }
-    const row = await prisma.enrollmentApplication.update({
-      where: { id: req.params.id },
-      data,
-      include: enrollmentInclude
-    });
-    if (data.status && data.status !== before.status) {
-      await prisma.statusHistory.create({
-        data: {
-          enrollmentId: row.id,
-          fromStatus: before.status,
-          toStatus: data.status,
-          changedBy: req.user!.id,
-          reason: data.decisionReason || 'Status updated'
-        }
+
+    const relationshipTouched = ['providerId', 'facilityId', 'practiceId', 'payerPlanId', 'payerId']
+      .some(k => Object.prototype.hasOwnProperty.call(data, k));
+
+    if (relationshipTouched) {
+      const facilityId = data.facilityId !== undefined ? data.facilityId : before.facilityId;
+      if (!facilityId) {
+        return res.status(400).json({ error: 'Facility is required' });
+      }
+      const links = await resolveEnrollmentLinks({
+        facilityId,
+        practiceId: data.practiceId !== undefined ? data.practiceId : before.practiceId,
+        organizationId: before.organizationId,
+        providerId: data.providerId !== undefined ? data.providerId : before.providerId,
+        payerPlanId: data.payerPlanId || before.payerPlanId,
+        payerId: data.payerId
       });
+      data.facilityId = links.facilityId;
+      data.practiceId = links.practiceId;
+      data.organizationId = links.organizationId;
+      data.providerId = links.providerId;
+      data.payerPlanId = links.payerPlanId;
+      delete data.payerId;
     }
-    if (data.assignedTo && data.assignedTo !== before.assignedTo) {
+
+    // Never allow client to change applicationNo; highlighting must not mutate status
+    delete data.applicationNo;
+    if (Object.prototype.hasOwnProperty.call(data, 'highlighted') && Object.keys(data).length === 1) {
+      // status intentionally untouched when only toggling highlight
+    }
+
+    const statusChanging = Boolean(data.status && data.status !== before.status);
+    const assigneeChanging = Object.prototype.hasOwnProperty.call(data, 'assignedTo')
+      && data.assignedTo !== before.assignedTo;
+
+    const row = await prisma.$transaction(async (tx) => {
+      const updated = await tx.enrollmentApplication.update({
+        where: { id: req.params.id },
+        data,
+        include: enrollmentInclude
+      });
+      if (statusChanging) {
+        await tx.statusHistory.create({
+          data: {
+            enrollmentId: updated.id,
+            fromStatus: before.status,
+            toStatus: data.status,
+            changedBy: req.user!.id,
+            reason: data.decisionReason || 'Status updated'
+          }
+        });
+        await tx.enrollmentActivity.create({
+          data: {
+            enrollmentId: updated.id,
+            authorId: req.user!.id,
+            body: `Status changed from ${before.status} to ${data.status}`,
+            activityType: 'STATUS_CHANGE',
+            metadata: {
+              fromStatus: before.status,
+              toStatus: data.status,
+              changedBy: req.user!.id,
+              changedByName: req.user!.email
+            }
+          }
+        });
+      }
+      if (assigneeChanging) {
+        await tx.enrollmentActivity.create({
+          data: {
+            enrollmentId: updated.id,
+            authorId: req.user!.id,
+            body: data.assignedTo
+              ? `Assigned to ${data.assignedTo}`
+              : 'Assignee cleared',
+            activityType: 'ASSIGNMENT',
+            metadata: {
+              previousAssignedTo: before.assignedTo,
+              assignedTo: data.assignedTo
+            }
+          }
+        });
+      }
+      return updated;
+    });
+
+    if (statusChanging) {
+      await notifyEnrollmentStakeholders(
+        row,
+        req.user!.id,
+        {
+          title: 'Enrollment status updated',
+          body: `${row.applicationNo}: ${before.status} → ${data.status}`,
+          type: 'enrollment_status'
+        }
+      );
+    }
+    if (assigneeChanging && data.assignedTo) {
       const assignee = await prisma.user.findFirst({ where: { email: { equals: data.assignedTo, mode: 'insensitive' } } });
-      if (assignee) {
+      if (assignee && assignee.id !== req.user!.id) {
         await notifyUser({
           userId: assignee.id,
           title: 'Enrollment assigned',
@@ -277,12 +438,18 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
           type: 'enrollment',
           entityType: 'enrollments',
           entityId: row.id,
-          href: `/enrollments?edit=${row.id}`
+          href: `/enrollments?activity=${row.id}`
         });
       }
     }
-    await audit(req, 'UPDATE', 'enrollments', row.id, before, row);
-    res.json(enrich(row, req.user!.role));
+    const usersByEmail = await loadAssigneeMap([row.assignedTo]);
+    const unreadActivityCount = await unreadActivityCountForUser(row.id, req.user!.id);
+    const action = Object.prototype.hasOwnProperty.call(data, 'highlighted')
+      && Object.keys(data).every(k => k === 'highlighted')
+      ? (data.highlighted ? 'HIGHLIGHT' : 'UNHIGHLIGHT')
+      : 'UPDATE';
+    await audit(req, action, 'enrollments', row.id, before, row);
+    res.json(enrich(row, req.user!.role, usersByEmail, { unreadActivityCount }));
   } catch (e: any) {
     if (e?.status) return res.status(e.status).json({ error: e.message });
     next(e);
@@ -307,6 +474,20 @@ router.post('/bulk-assign', allowRoles(Role.ADMIN, Role.CREDENTIALING_MANAGER, R
         body: `${result.count} enrollment(s) were assigned to you`,
         type: 'enrollment',
         href: '/enrollments?mine=1'
+      });
+    }
+    if (input.ids.length) {
+      const now = new Date();
+      await prisma.enrollmentActivity.createMany({
+        data: input.ids.map(enrollmentId => ({
+          enrollmentId,
+          authorId: req.user!.id,
+          body: `Assigned to ${input.assignedTo}`,
+          activityType: 'ASSIGNMENT',
+          metadata: { assignedTo: input.assignedTo, bulk: true },
+          createdAt: now,
+          updatedAt: now
+        }))
       });
     }
     await audit(req, 'BULK_ASSIGN', 'enrollments', undefined, undefined, { ids: input.ids, assignedTo: input.assignedTo, count: result.count });

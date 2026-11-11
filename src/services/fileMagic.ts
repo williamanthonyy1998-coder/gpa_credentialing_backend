@@ -8,6 +8,8 @@ export const BANKING_ALLOWED_MIME = new Set(['application/pdf', 'image/jpeg', 'i
 export const OTHER_DOCUMENTS_ALLOWED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png']);
 /** Agreements & Contracts — secure PDF / JPG / JPEG / PNG only. */
 export const AGREEMENTS_ALLOWED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png']);
+/** IRS Documents (W-9 Form, EIN Letter) — secure PDF / JPG / JPEG / PNG only. */
+export const IRS_ALLOWED_MIME = new Set(['application/pdf', 'image/jpeg', 'image/png']);
 export const GENERAL_ALLOWED_MIME = new Set([
   'application/pdf',
   'image/jpeg',
