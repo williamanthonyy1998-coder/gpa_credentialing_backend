@@ -5,11 +5,14 @@ import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
 import { notifyUser } from '../services/notifications';
+import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
 
 const router = Router();
 
 router.get('/:id/comments', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    await assertRecordInTenant(req.tenantContext!, 'tasks', req.params.id);
     const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true } });
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const comments = await prisma.taskComment.findMany({
@@ -27,6 +30,8 @@ router.post('/:id/comments', async (req: AuthRequest, res: Response, next: NextF
       return res.status(403).json({ error: 'Your role cannot comment on tasks' });
     }
     const input = z.object({ body: z.string().min(1).max(4000) }).parse(req.body);
+    requireTenantContext(req.tenantContext);
+    await assertRecordInTenant(req.tenantContext!, 'tasks', req.params.id);
     const task = await prisma.task.findUnique({
       where: { id: req.params.id },
       include: { assignedTo: { select: { id: true } }, createdBy: { select: { id: true } } }

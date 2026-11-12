@@ -1,6 +1,6 @@
 import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { Prisma, Role } from '@prisma/client';
+import { DirectoryScope, Prisma, RecordStatus, Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
@@ -30,6 +30,16 @@ import {
   getAuthorizedOrganizationIds,
   resolveRecordOrganizationId
 } from '../services/orgAccess';
+import {
+  andWhere,
+  assertProviderInTenant,
+  assertRecordInTenant,
+  assertRelatedRecordsSameTenant,
+  listWhereForResource,
+  requireTenantContext
+} from '../services/tenantAccess';
+import type { TenantAuthContext } from '../services/tenantAccess';
+import { assertCredentialCategoryCodeAssignable } from '../services/directoryIntegration';
 
 const router = Router();
 
@@ -167,73 +177,60 @@ function stripAssociationFields(data: any) {
   return { rest, facilityIds, providerIds, draft };
 }
 
-async function assertFacilityIdsInOrg(facilityIds: string[], organizationId: string | null | undefined, userId: string, role: Role) {
+async function assertFacilityIdsInOrg(
+  facilityIds: string[],
+  organizationId: string | null | undefined,
+  tenantId: string,
+  userId: string,
+  role: Role,
+  tenantCtx: TenantAuthContext
+) {
   if (!facilityIds?.length) return;
-  const facilities = await prisma.facility.findMany({
-    where: { id: { in: facilityIds } },
-    select: { id: true, organizationId: true, practice: { select: { organizationId: true } } }
-  });
-  if (facilities.length !== facilityIds.length) {
+  if (facilityIds.length !== [...new Set(facilityIds)].length) {
     const err: any = new Error('One or more facilities were not found');
     err.status = 400;
     throw err;
   }
-  for (const f of facilities) {
+  for (const facilityId of facilityIds) {
+    await assertRelatedRecordsSameTenant(tenantId, { facilityId, organizationId });
+    const f = await prisma.facility.findFirst({
+      where: { id: facilityId },
+      select: { organizationId: true, practice: { select: { organizationId: true } } }
+    });
+    if (!f) {
+      const err: any = new Error('One or more facilities were not found');
+      err.status = 400;
+      throw err;
+    }
     const orgId = f.organizationId || f.practice?.organizationId || null;
     if (organizationId && orgId && orgId !== organizationId) {
       const err: any = new Error('Cannot attach a facility from another organization');
       err.status = 403;
       throw err;
     }
-    await assertOrganizationAccess(userId, role, orgId);
+    await assertOrganizationAccess(userId, role, orgId, tenantCtx);
   }
 }
 
-async function assertProviderIdsInOrg(providerIds: string[], organizationId: string | null | undefined, userId: string, role: Role) {
+async function assertProviderIdsInOrg(
+  providerIds: string[],
+  tenantId: string
+) {
   if (!providerIds?.length) return;
-  const providers = await prisma.provider.findMany({
-    where: { id: { in: providerIds } },
-    select: {
-      id: true,
-      organizations: { select: { organizationId: true } },
-      facilities: { select: { facility: { select: { organizationId: true, practice: { select: { organizationId: true } } } } } },
-      practices: { select: { practice: { select: { organizationId: true } } } }
-    }
-  });
-  if (providers.length !== providerIds.length) {
-    const err: any = new Error('One or more providers were not found');
-    err.status = 400;
-    throw err;
+  for (const providerId of providerIds) {
+    await assertProviderInTenant(tenantId, providerId);
   }
-  const allowedOrgs = await getAuthorizedOrganizationIds(userId, role);
-  for (const p of providers) {
-    const orgIds = new Set<string>();
-    p.organizations.forEach(o => orgIds.add(o.organizationId));
-    p.practices.forEach(pp => { if (pp.practice?.organizationId) orgIds.add(pp.practice.organizationId); });
-    p.facilities.forEach(pf => {
-      const oid = pf.facility?.organizationId || pf.facility?.practice?.organizationId;
-      if (oid) orgIds.add(oid);
-    });
-    if (organizationId && orgIds.size && !orgIds.has(organizationId)) {
-      const err: any = new Error('Cannot attach a provider from another organization');
-      err.status = 403;
-      throw err;
-    }
-    if (allowedOrgs) {
-      const overlap = [...orgIds].some(id => allowedOrgs.includes(id));
-      // Providers with no org links are only usable by global/admin users
-      if (orgIds.size && !overlap) {
-        const err: any = new Error('You are not authorized to attach this provider');
-        err.status = 403;
-        throw err;
-      }
-      if (!orgIds.size) {
-        const err: any = new Error('You are not authorized to attach this provider');
-        err.status = 403;
-        throw err;
-      }
-    }
-  }
+}
+
+function orgScopeFilter(orgIds: string[]) {
+  if (!orgIds.length) return null;
+  return {
+    OR: [
+      { organizationId: { in: orgIds } },
+      { facility: { OR: [{ organizationId: { in: orgIds } }, { practice: { is: { organizationId: { in: orgIds } } } }] } },
+      { practice: { is: { organizationId: { in: orgIds } } } }
+    ]
+  };
 }
 
 async function syncAssociations(
@@ -372,12 +369,38 @@ function assertVoidedCheckRequired(type: string | null | undefined, data: any, d
   }
 }
 
-router.get('/categories', (_req, res) => {
-  res.json(DOCUMENT_CATEGORIES);
+router.get('/categories', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const tenantId = req.tenantContext?.tenantId ?? null;
+    const rows = await prisma.credentialCategory.findMany({
+      where: {
+        status: RecordStatus.ACTIVE,
+        OR: [
+          { scope: DirectoryScope.PLATFORM, tenantId: null },
+          ...(tenantId ? [{ scope: DirectoryScope.TENANT, tenantId }] : [])
+        ]
+      },
+      orderBy: [{ sortOrder: 'asc' }, { code: 'asc' }]
+    });
+    if (rows.length > 0) {
+      return res.json(
+        rows.map((c) => ({
+          key: c.code,
+          label: c.name,
+          types: (c.documentTypes as unknown[]) ?? []
+        }))
+      );
+    }
+    res.json(DOCUMENT_CATEGORIES);
+  } catch (e) {
+    next(e);
+  }
 });
 
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     const category = String(req.query.category || '').trim();
     const organizationId = String(req.query.organizationId || '').trim();
     const practiceId = String(req.query.practiceId || '').trim();
@@ -385,19 +408,15 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
     const providerId = String(req.query.providerId || '').trim();
     const q = String(req.query.q || '').trim();
 
-    const allowedOrgs = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
-    const where: any = {};
+    const allowedOrgs = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    let where: any = andWhere(listWhereForResource('documents', tenantId)!, {}) || {};
     if (category) where.category = category;
+    const orgFilter = orgScopeFilter(allowedOrgs);
     if (organizationId) {
-      await assertOrganizationAccess(req.user!.id, req.user!.role, organizationId);
-      where.organizationId = organizationId;
-    } else if (allowedOrgs) {
-      where.OR = [
-        { organizationId: { in: allowedOrgs } },
-        { facility: { organizationId: { in: allowedOrgs } } },
-        { practice: { organizationId: { in: allowedOrgs } } },
-        { organizationId: null, facilityId: null, practiceId: null }
-      ];
+      await assertOrganizationAccess(req.user!.id, req.user!.role, organizationId, req.tenantContext);
+      where = andWhere(where, { organizationId });
+    } else if (orgFilter) {
+      where = andWhere(where, orgFilter);
     }
     if (practiceId) where.practiceId = practiceId;
     if (facilityId) {
@@ -442,19 +461,26 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
 
 router.get('/attention', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     const organizationId = String(req.query.organizationId || '').trim();
     const practiceId = String(req.query.practiceId || '').trim();
     const facilityId = String(req.query.facilityId || '').trim();
-    const where: any = { ignored: false };
+    let where: any = andWhere(listWhereForResource('documents', tenantId)!, { ignored: false }) || { ignored: false };
     if (facilityId) {
-      where.OR = [
-        { facilityId },
-        { documentFacilities: { some: { facilityId } } }
-      ];
-    } else if (practiceId) where.practiceId = practiceId;
-    else if (organizationId) {
-      await assertOrganizationAccess(req.user!.id, req.user!.role, organizationId);
-      where.organizationId = organizationId;
+      await assertRelatedRecordsSameTenant(tenantId, { facilityId });
+      where = andWhere(where, {
+        OR: [
+          { facilityId },
+          { documentFacilities: { some: { facilityId } } }
+        ]
+      });
+    } else if (practiceId) {
+      await assertRelatedRecordsSameTenant(tenantId, { practiceId });
+      where = andWhere(where, { practiceId });
+    } else if (organizationId) {
+      await assertOrganizationAccess(req.user!.id, req.user!.role, organizationId, req.tenantContext);
+      where = andWhere(where, { organizationId });
     }
     const rows = await prisma.document.findMany({
       where,
@@ -481,13 +507,13 @@ router.get('/attention', async (req: AuthRequest, res: Response, next: NextFunct
 
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
     const row = await prisma.document.findUnique({
       where: { id: req.params.id },
       include: credentialInclude
     });
     if (!row) return res.status(404).json({ error: 'Credential not found' });
-    const orgId = await resolveRecordOrganizationId('documents', row.id);
-    await assertOrganizationAccess(req.user!.id, req.user!.role, orgId);
     await audit(req, 'VIEW', 'documents', row.id, undefined, {
       id: row.id, title: row.title, type: row.type, category: row.category
     });
@@ -497,6 +523,8 @@ router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) =
 
 router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const parsed = clean(docSchema.parse(req.body));
     sanitizeTypeSpecificFields(parsed.type, parsed.category, parsed);
@@ -505,16 +533,23 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
     if (!rest.category) rest.category = 'organization';
     if (rest.warningDays == null) rest.warningDays = 30;
     assertVoidedCheckRequired(rest.type, rest, draft);
+    await assertCredentialCategoryCodeAssignable(String(rest.category), tenantId, { forCreate: true });
 
-    if (rest.organizationId) await assertOrganizationAccess(req.user!.id, req.user!.role, rest.organizationId);
+    if (rest.organizationId) await assertOrganizationAccess(req.user!.id, req.user!.role, rest.organizationId, req.tenantContext);
     if (rest.facilityId) {
       const fOrg = await resolveRecordOrganizationId('facilities', rest.facilityId);
-      await assertOrganizationAccess(req.user!.id, req.user!.role, fOrg);
+      await assertOrganizationAccess(req.user!.id, req.user!.role, fOrg, req.tenantContext);
       if (!rest.organizationId && fOrg) rest.organizationId = fOrg;
     }
 
-    await assertFacilityIdsInOrg(facilityIds || [], rest.organizationId, req.user!.id, req.user!.role);
-    await assertProviderIdsInOrg(providerIds || [], rest.organizationId, req.user!.id, req.user!.role);
+    await assertRelatedRecordsSameTenant(tenantId, {
+      organizationId: rest.organizationId,
+      practiceId: rest.practiceId,
+      facilityId: rest.facilityId,
+      providerId: rest.providerId
+    });
+    await assertFacilityIdsInOrg(facilityIds || [], rest.organizationId, tenantId, req.user!.id, req.user!.role, req.tenantContext!);
+    await assertProviderIdsInOrg(providerIds || [], tenantId);
 
     const attention = computeCredentialAttention({ ...rest, storageKey: null });
     if (attention === 'MISSING' && !rest.status) rest.status = 'MISSING';
@@ -524,7 +559,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
 
     const row = await prisma.$transaction(async (tx) => {
       const created = await tx.document.create({
-        data: { ...persisted, createdById: req.user!.id },
+        data: { ...persisted, tenantId, createdById: req.user!.id },
         include: credentialInclude
       });
       await syncAssociations(tx, created.id, facilityIds, providerIds, rest.facilityId, rest.providerId);
@@ -549,7 +584,10 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
 
 router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
+    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
     const parsed = clean(docSchema.partial().parse(req.body));
     const before = await prisma.document.findUnique({
       where: { id: req.params.id },
@@ -558,18 +596,26 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
     if (!before) return res.status(404).json({ error: 'Document not found' });
 
     const orgId = await resolveRecordOrganizationId('documents', before.id);
-    await assertOrganizationAccess(req.user!.id, req.user!.role, orgId);
 
     const typeForSanitize = parsed.type ?? before.type;
     const categoryForSanitize = parsed.category ?? before.category;
     sanitizeTypeSpecificFields(typeForSanitize, categoryForSanitize, parsed);
     assertBankingWriteAccess(req.user!.role, parsed);
     const { rest, facilityIds, providerIds, draft } = stripAssociationFields(parsed);
+    if (rest.category && rest.category !== before.category) {
+      await assertCredentialCategoryCodeAssignable(String(rest.category), tenantId, { forCreate: true });
+    }
 
-    if (rest.organizationId) await assertOrganizationAccess(req.user!.id, req.user!.role, rest.organizationId);
+    if (rest.organizationId) await assertOrganizationAccess(req.user!.id, req.user!.role, rest.organizationId, req.tenantContext);
     const effectiveOrg = rest.organizationId ?? before.organizationId ?? orgId;
-    await assertFacilityIdsInOrg(facilityIds || [], effectiveOrg, req.user!.id, req.user!.role);
-    await assertProviderIdsInOrg(providerIds || [], effectiveOrg, req.user!.id, req.user!.role);
+    await assertRelatedRecordsSameTenant(tenantId, {
+      organizationId: rest.organizationId ?? before.organizationId,
+      practiceId: rest.practiceId ?? before.practiceId,
+      facilityId: rest.facilityId ?? before.facilityId,
+      providerId: rest.providerId ?? before.providerId
+    });
+    await assertFacilityIdsInOrg(facilityIds || [], effectiveOrg, tenantId, req.user!.id, req.user!.role, req.tenantContext!);
+    await assertProviderIdsInOrg(providerIds || [], tenantId);
 
     assertVoidedCheckRequired(typeForSanitize, rest, draft, before);
 
@@ -625,13 +671,13 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
 
 router.delete('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
+    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
     const before = await prisma.document.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Document not found' });
-    const orgId = await resolveRecordOrganizationId('documents', before.id);
-    await assertOrganizationAccess(req.user!.id, req.user!.role, orgId);
     await prisma.document.delete({ where: { id: before.id } });
     await audit(req, 'DELETE', 'documents', before.id, {
       id: before.id, title: before.title, type: before.type, organizationId: before.organizationId

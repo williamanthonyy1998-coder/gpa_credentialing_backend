@@ -15,6 +15,57 @@ enum Role {
   APPROVER
   AUDITOR
   READ_ONLY
+  /// External client portal user (tenant-scoped). Never a GPA platform administrator.
+  CLIENT_USER
+  /// External healthcare provider — intake-scoped access only; never platform/client admin.
+  EXTERNAL_PROVIDER
+}
+
+enum TenantOnboardingStatus {
+  NOT_STARTED
+  INVITED
+  ACCOUNT_ACTIVATED
+  PROFILE_PENDING
+  UNDER_REVIEW
+  ACTIVE
+  SUSPENDED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum InvitationDeliveryStatus {
+  NOT_SENT
+  SENT
+  FAILED
+}
+
+/// Platform-level GPA staff roles remain on User.role (including ADMIN).
+/// TenantRole is client-account scoped and must not grant cross-tenant access.
+enum TenantRole {
+  TENANT_ADMIN
+  CREDENTIALING_MANAGER
+  CREDENTIALING_SPECIALIST
+  ENROLLMENT_SPECIALIST
+  APPROVER
+  AUDITOR
+  READ_ONLY
+}
+
+enum TenantStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
+}
+
+enum TenantMembershipStatus {
+  ACTIVE
+  INACTIVE
+  SUSPENDED
 }
 enum RecordStatus {
   ACTIVE
@@ -37,11 +88,17 @@ enum EnrollmentStatus {
   PREPARING
   READY_TO_SUBMIT
   SUBMITTED
+  /// Payer acknowledged receipt (distinct from submission and from approval).
+  ACKNOWLEDGED
   PAYER_REVIEW
   ADDITIONAL_INFORMATION_NEEDED
   APPROVED
+  /// Participation is effective as of effectiveAt (requires prior approval basis).
+  EFFECTIVE
   DENIED
   WITHDRAWN
+  TERMINATED
+  CLOSED
 }
 enum TaskStatus {
   OPEN
@@ -55,6 +112,16 @@ enum Priority {
   NORMAL
   HIGH
   URGENT
+}
+
+/// Internal profile review lifecycle (Phase 3C). Distinct from license/history verification
+/// and from payer enrollment approval.
+enum ProfileReviewStatus {
+  NOT_STARTED
+  IN_PROGRESS
+  CORRECTIONS_REQUESTED
+  RESUBMITTED
+  COMPLETED
 }
 enum DocumentStatus {
   MISSING
@@ -82,6 +149,7 @@ model User {
   manager      User?    @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
   directReports User[]  @relation("EmployeeManager")
   organizations UserOrganization[]
+  tenantMemberships TenantMembership[]
   leaveRequests LeaveRequest[] @relation("LeaveApplicant")
   leaveReviews  LeaveRequest[] @relation("LeaveReviewer")
   leaveBalances LeaveBalance[]
@@ -101,6 +169,168 @@ model User {
   tasks        Task[]   @relation("TaskAssignee")
   createdTasks Task[]   @relation("TaskCreator")
   createdDocuments Document[] @relation("DocumentCreator")
+  dataQualityIssuesAssigned DataQualityIssue[] @relation("DataQualityAssignee")
+  dataQualityIssuesResolved DataQualityIssue[] @relation("DataQualityResolver")
+  invitationsSent TenantInvitation[] @relation("InvitationInviter")
+  providerIntakeInvitationsSent ProviderIntakeInvitation[] @relation("ProviderIntakeInviter")
+  providerIntakes IntakeRequest[] @relation("IntakeProviderUser")
+  payerRequirementsReviewed PayerRequirement[] @relation("PayerRequirementReviewer")
+  enrollmentPacketsCreated  EnrollmentPacket[] @relation("EnrollmentPacketCreator")
+  enrollmentSubmissionsCreated EnrollmentSubmission[] @relation("EnrollmentSubmissionCreator")
+  enrollmentSubmissionsConfirmed EnrollmentSubmission[] @relation("EnrollmentSubmissionConfirmer")
+  enrollmentCommunicationsCreated EnrollmentCommunication[] @relation("EnrollmentCommunicationCreator")
+  externalIntegrationsConfigured ExternalIntegration[] @relation("ExternalIntegrationConfigurator")
+  providerIntegrationAuthsGranted ProviderIntegrationAuthorization[] @relation("ProviderIntegrationAuthGranter")
+  providerIntegrationAuthEvents ProviderIntegrationAuthorizationEvent[] @relation("ProviderIntegrationAuthEventActor")
+  externalIntegrationOperationsInitiated ExternalIntegrationOperation[] @relation("ExternalIntegrationOperationInitiator")
+  revalidationsAssigned EnrollmentRevalidation[] @relation("RevalidationAssignee")
+  revalidationsCreated EnrollmentRevalidation[] @relation("RevalidationCreator")
+  revalidationEvents EnrollmentRevalidationEvent[] @relation("RevalidationEventActor")
+}
+
+/// Independent client account on the GPA platform. Distinct from Organization
+/// (a legal/business entity that may belong to a tenant).
+model Tenant {
+  id            String       @id @default(cuid())
+  name          String
+  slug          String       @unique
+  status        TenantStatus @default(ACTIVE)
+  /// Client onboarding lifecycle (separate from TenantStatus).
+  onboardingStatus TenantOnboardingStatus @default(NOT_STARTED)
+  primaryContactName  String?
+  primaryContactEmail String?
+  primaryContactPhone String?
+  /// GPA-only notes — never exposed on client portal APIs.
+  internalNotes String?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  memberships   TenantMembership[]
+  invitations   TenantInvitation[]
+  organizations Organization[]
+  providers     TenantProvider[]
+  documents     Document[]
+  cases         CredentialingCase[]
+  enrollments   EnrollmentApplication[]
+  tasks         Task[]
+  intakeRequests IntakeRequest[]
+  providerIntakeInvitations ProviderIntakeInvitation[]
+  auditEvents   AuditEvent[]
+  payerContacts PayerContact[]
+  billingEntities BillingEntity[]
+  credentialCategories CredentialCategory[]
+  payerRequirements PayerRequirement[]
+  enrollmentPackets EnrollmentPacket[]
+  enrollmentSubmissions EnrollmentSubmission[]
+  enrollmentCommunications EnrollmentCommunication[]
+  externalIntegrations ExternalIntegration[]
+  providerIntegrationAuthorizations ProviderIntegrationAuthorization[]
+  externalIntegrationOperations ExternalIntegrationOperation[]
+  enrollmentRevalidations EnrollmentRevalidation[]
+  dataQualityIssues DataQualityIssue[]
+  educationHistory              ProviderEducation[]
+  residencyHistory              ProviderResidency[]
+  fellowshipHistory             ProviderFellowship[]
+  boardCertificationHistory     ProviderBoardCertification[]
+  professionalCertificationHistory ProviderProfessionalCertification[]
+  employmentHistory             ProviderEmployment[]
+  hospitalAffiliationHistory    ProviderHospitalAffiliation[]
+  malpracticeHistory            ProviderMalpracticePolicy[]
+  professionalHistoryDocuments  ProfessionalHistoryDocument[]
+  professionalHistoryVerifications ProfessionalHistoryVerificationEvent[]
+  licenses                      License[]
+  profileReviews                ProviderProfileReview[]
+  credentialingQaScans          CredentialingQaScan[]
+  @@index([status])
+  @@index([onboardingStatus])
+}
+
+/// Secure invitation for external provider intake. Distinct from TenantInvitation
+/// (client staff membership). Does NOT create TenantMembership.
+model ProviderIntakeInvitation {
+  id              String                   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  intakeRequestId String
+  intakeRequest   IntakeRequest            @relation(fields: [intakeRequestId], references: [id], onDelete: Cascade)
+  email           String
+  /// Optional known provider identity hint (does not grant access by itself).
+  knownProviderId String?
+  invitedById     String?
+  invitedBy       User?                    @relation("ProviderIntakeInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  tokenHash       String                   @unique
+  status          InvitationStatus         @default(PENDING)
+  deliveryStatus  InvitationDeliveryStatus @default(NOT_SENT)
+  deliveryError   String?
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+  lastSentAt      DateTime?
+  acceptedUserId  String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  @@index([tenantId, status])
+  @@index([intakeRequestId, status])
+  @@index([email, status])
+  @@index([expiresAt])
+}
+
+/// Secure client invitation. Raw token is never stored — only tokenHash.
+model TenantInvitation {
+  id              String                   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  email           String
+  role            TenantRole
+  invitedById     String?
+  invitedBy       User?                    @relation("InvitationInviter", fields: [invitedById], references: [id], onDelete: SetNull)
+  tokenHash       String                   @unique
+  status          InvitationStatus         @default(PENDING)
+  deliveryStatus  InvitationDeliveryStatus @default(NOT_SENT)
+  deliveryError   String?
+  expiresAt       DateTime
+  acceptedAt      DateTime?
+  revokedAt       DateTime?
+  lastSentAt      DateTime?
+  acceptedUserId  String?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  @@index([tenantId, status])
+  @@index([email, status])
+  @@index([expiresAt])
+}
+
+/// Explicit tenant ownership for a Provider identity. Required for tenant isolation.
+/// A provider may belong to multiple tenants only via separate links; Phase 0B
+/// still keeps the shared Provider row for identity continuity, but access is
+/// denied unless a TenantProvider link exists for the active tenant.
+model TenantProvider {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  @@unique([tenantId, providerId])
+  @@index([providerId])
+  @@index([tenantId])
+}
+
+model TenantMembership {
+  id        String                 @id @default(cuid())
+  userId    String
+  user      User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tenantId  String
+  tenant    Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  role      TenantRole
+  status    TenantMembershipStatus @default(ACTIVE)
+  createdAt DateTime               @default(now())
+  updatedAt DateTime               @updatedAt
+  @@unique([userId, tenantId])
+  @@index([tenantId])
+  @@index([userId])
+  @@index([tenantId, status])
+  @@index([userId, status])
 }
 
 model UserOrganization {
@@ -116,6 +346,9 @@ model UserOrganization {
 
 model Organization {
   id             String   @id @default(cuid())
+  /// Optional until Phase 0B tenant assignment/isolation. Null = unassigned legacy row.
+  tenantId       String?
+  tenant         Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   legalName      String
   dba            String?
   taxId          String?
@@ -146,6 +379,9 @@ model Organization {
   members        UserOrganization[]
   tasks          Task[]
   intakeRequests IntakeRequest[]
+  billingEntities BillingEntity[]
+  @@index([tenantId])
+  @@index([tenantId, status])
 }
 
 model Practice {
@@ -181,6 +417,7 @@ model Practice {
   enrollments    EnrollmentApplication[]
   documents      Document[]
   tasks          Task[]
+  billingEntityLinks BillingEntityPractice[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([organizationId])
@@ -233,6 +470,7 @@ model Facility {
   documentLinks DocumentFacility[]
   enrollments EnrollmentApplication[]
   tasks       Task[]
+  hospitalAffiliations ProviderHospitalAffiliation[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   @@index([practiceId])
@@ -269,8 +507,13 @@ model Provider {
   homePhone          String?
   workPhone          String?
   address            Json?
+  /// Legacy free-text specialties retained for compatibility.
   primarySpecialty   String?
   secondarySpecialty String?
+  primarySpecialtyId String?
+  primarySpecialtyRef Specialty? @relation("ProviderPrimarySpecialty", fields: [primarySpecialtyId], references: [id], onDelete: SetNull)
+  secondarySpecialtyId String?
+  secondarySpecialtyRef Specialty? @relation("ProviderSecondarySpecialty", fields: [secondarySpecialtyId], references: [id], onDelete: SetNull)
   taxonomyCode       String?
   professionalType   String?
   supervisorName     String?
@@ -284,10 +527,28 @@ model Provider {
   documents          Document[]
   documentLinks      DocumentProvider[]
   tasks              Task[]
+  tenantLinks        TenantProvider[]
+  specialties        ProviderSpecialty[]
+  educationHistory   ProviderEducation[]
+  residencyHistory   ProviderResidency[]
+  fellowshipHistory  ProviderFellowship[]
+  boardCertifications ProviderBoardCertification[]
+  professionalCertifications ProviderProfessionalCertification[]
+  employmentHistory  ProviderEmployment[]
+  hospitalAffiliations ProviderHospitalAffiliation[]
+  malpracticePolicies ProviderMalpracticePolicy[]
+  professionalHistoryDocuments ProfessionalHistoryDocument[]
+  professionalHistoryVerifications ProfessionalHistoryVerificationEvent[]
+  profileReviews     ProviderProfileReview[]
+  integrationAuthorizations ProviderIntegrationAuthorization[]
+  externalIntegrationOperations ExternalIntegrationOperation[]
+  enrollmentRevalidations EnrollmentRevalidation[]
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt
   @@index([lastName, firstName])
   @@index([status])
+  @@index([primarySpecialtyId])
+  @@index([secondarySpecialtyId])
 }
 
 model ProviderPractice {
@@ -329,20 +590,72 @@ model ProviderOrganization {
 }
 
 model License {
-  id          String   @id @default(cuid())
-  providerId  String
-  provider    Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
-  type        String
-  number      String?
-  state       String?
-  issuedAt    DateTime?
-  expiresAt   DateTime?
-  status      DocumentStatus @default(RECEIVED)
-  issuingBody String?
-  notes       String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id            String   @id @default(cuid())
+  providerId    String
+  provider      Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  /// Tenant ownership for isolation. Backfilled from TenantProvider when known.
+  tenantId      String?
+  tenant        Tenant?  @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  /// Legacy free-text type retained for compatibility.
+  type          String
+  licenseTypeId String?
+  licenseType   LicenseType? @relation(fields: [licenseTypeId], references: [id], onDelete: SetNull)
+  number        String?
+  /// Legacy free-text state retained for compatibility.
+  state         String?
+  usStateId     String?
+  usState       UsState? @relation(fields: [usStateId], references: [id], onDelete: SetNull)
+  issuedAt      DateTime?
+  expiresAt     DateTime?
+  /// Operational/document status (legacy). Prefer verificationStatus + computed attention for lifecycle.
+  status        DocumentStatus @default(RECEIVED)
+  issuingBody   String?
+  notes         String?
+  isPrimary     Boolean  @default(false)
+  archived      Boolean  @default(false)
+  suspended     Boolean  @default(false)
+  /// Manual review lifecycle — upload alone never implies VERIFIED.
+  verificationStatus HistoryVerificationStatus @default(NOT_SUBMITTED)
+  verifiedAt    DateTime?
+  verifiedById  String?
+  rejectionReason String?
+  reviewerNotes String?
+  correctionRequest String?
+  documentId    String?
+  /// Prior license preserved on renewal (do not overwrite history).
+  renewedFromId String?
+  renewedFrom   License?  @relation("LicenseRenewal", fields: [renewedFromId], references: [id], onDelete: SetNull)
+  renewals      License[] @relation("LicenseRenewal")
+  sourceIntakeId String?
+  events        LicenseEvent[]
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
   @@index([providerId, expiresAt])
+  @@index([tenantId, providerId])
+  @@index([tenantId, verificationStatus])
+  @@index([tenantId, expiresAt])
+  @@index([licenseTypeId])
+  @@index([usStateId])
+  @@index([renewedFromId])
+  @@index([archived, suspended])
+}
+
+/// Append-only license lifecycle history (Phase 3B).
+model LicenseEvent {
+  id        String   @id @default(cuid())
+  licenseId String
+  license   License  @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  tenantId  String?
+  action    String
+  fromStatus String?
+  toStatus  String?
+  actorId   String?
+  reason    String?
+  /// Non-sensitive metadata only — never full license numbers.
+  detail    Json?
+  createdAt DateTime @default(now())
+  @@index([licenseId, createdAt])
+  @@index([tenantId, createdAt])
 }
 
 model Document {
@@ -351,6 +664,10 @@ model Document {
   type           String
   category       String?
   status         DocumentStatus @default(RECEIVED)
+  /// Upload quarantine / availability for consumption (malware scan policy).
+  /// New uploads default QUARANTINED until scanner or authorized manual release.
+  /// Legacy AVAILABLE rows are preserved; do not bulk-migrate without an approved plan.
+  securityStatus DocumentSecurityStatus @default(QUARANTINED)
   storageKey     String?
   originalName   String?
   mimeType       String?
@@ -379,6 +696,9 @@ model Document {
   uploadedAt       DateTime?
   createdById    String?
   createdBy      User? @relation("DocumentCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  /// Nullable until backfilled; tenant-scoped access denies unmapped rows.
+  tenantId       String?
+  tenant         Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   providerId     String?
   provider       Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
   organizationId String?
@@ -389,9 +709,18 @@ model Document {
   facility       Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
   enrollmentId   String?
   enrollment     EnrollmentApplication? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  intakeRequestId String?
+  intakeRequest   IntakeRequest? @relation(fields: [intakeRequestId], references: [id], onDelete: SetNull)
   documentFacilities DocumentFacility[]
   documentProviders  DocumentProvider[]
   activityAttachments EnrollmentActivityAttachment[]
+  packetItems        EnrollmentPacketItem[]
+  enrollmentSubmissions EnrollmentSubmission[]
+  enrollmentCommunications EnrollmentCommunication[]
+  providerIntegrationAuthEvidence ProviderIntegrationAuthorization[]
+  revalidationEvidence EnrollmentRevalidation[]
+  /// Prior file versions retained when a document is replaced (Phase 2C).
+  fileRevisions  DocumentFileRevision[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@index([type, status])
@@ -399,6 +728,27 @@ model Document {
   @@index([expiresAt])
   @@index([facilityId, category])
   @@index([enrollmentId])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([intakeRequestId])
+  @@index([securityStatus])
+}
+
+/// Retains superseded file metadata when a Document is replaced.
+/// Physical files under private-uploads are kept for audit; not auto-deleted.
+model DocumentFileRevision {
+  id             String                 @id @default(cuid())
+  documentId     String
+  document       Document               @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  storageKey     String?
+  originalName   String?
+  mimeType       String?
+  sizeBytes      Int?
+  securityStatus DocumentSecurityStatus
+  reason         String                 @default("REPLACE")
+  createdById    String?
+  createdAt      DateTime               @default(now())
+  @@index([documentId, createdAt])
 }
 
 model DocumentFacility {
@@ -424,6 +774,8 @@ model DocumentProvider {
 model CredentialingCase {
   id          String @id @default(cuid())
   caseNumber  String @unique
+  tenantId    String?
+  tenant      Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   providerId  String
   provider    Provider @relation(fields: [providerId], references: [id], onDelete: Cascade)
   practiceId  String?
@@ -442,38 +794,63 @@ model CredentialingCase {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   @@index([status, dueAt])
+  @@index([tenantId])
+  @@index([tenantId, status])
 }
 
 model Payer {
-  id        String @id @default(cuid())
-  name      String
-  payerCode String?
-  website   String?
-  phone     String?
-  status    RecordStatus @default(ACTIVE)
-  plans     PayerPlan[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String @id @default(cuid())
+  name        String
+  legalName   String?
+  payerCode   String?
+  payerType   String?
+  website     String?
+  phone       String?
+  fax         String?
+  email       String?
+  address     Json?
+  notes       String?
+  status      RecordStatus @default(ACTIVE)
+  plans       PayerPlan[]
+  contacts    PayerContact[]
+  requirements PayerRequirement[]
+  revalidations EnrollmentRevalidation[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
   @@unique([name, payerCode])
+  @@index([status])
+  @@index([payerType, status])
 }
 
 model PayerPlan {
-  id        String @id @default(cuid())
-  payerId   String
-  payer     Payer @relation(fields: [payerId], references: [id], onDelete: Cascade)
-  name      String
-  planType  String?
-  checklist Json?
-  enrollments EnrollmentApplication[]
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                 String @id @default(cuid())
+  payerId            String
+  payer              Payer @relation(fields: [payerId], references: [id], onDelete: Cascade)
+  name               String
+  planCode           String?
+  planType           String?
+  /// Preserved legacy checklist JSON. Structured requirements also live in PayerRequirement.
+  checklist          Json?
+  stateApplicability String?
+  metadata           Json?
+  status             RecordStatus @default(ACTIVE)
+  enrollments        EnrollmentApplication[]
+  contacts           PayerContact[]
+  requirements       PayerRequirement[]
+  revalidations      EnrollmentRevalidation[]
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
   @@unique([payerId, name])
+  @@index([status])
+  @@index([payerId, status])
 }
 
 model EnrollmentApplication {
   id            String @id @default(cuid())
   applicationNo String @unique
   subject       String?
+  tenantId      String?
+  tenant        Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   providerId    String?
   provider      Provider? @relation(fields: [providerId], references: [id], onDelete: SetNull)
   organizationId String?
@@ -482,12 +859,20 @@ model EnrollmentApplication {
   facility      Facility? @relation(fields: [facilityId], references: [id], onDelete: SetNull)
   practiceId    String?
   practice      Practice? @relation(fields: [practiceId], references: [id], onDelete: SetNull)
+  /// Optional billing entity for group/billing enrollment context (tenant-scoped).
+  billingEntityId String?
+  billingEntity   BillingEntity? @relation(fields: [billingEntityId], references: [id], onDelete: SetNull)
+  /// INDIVIDUAL | GROUP | FACILITY | REASSIGNMENT | OTHER
+  enrollmentType String @default("INDIVIDUAL")
   payerPlanId   String
   payerPlan     PayerPlan @relation(fields: [payerPlanId], references: [id], onDelete: Restrict)
   status        EnrollmentStatus @default(NOT_STARTED)
   assignedTo    String?
   dueAt         DateTime?
+  /// Internal preparation started (not payer submission).
+  preparedAt    DateTime?
   submittedAt   DateTime?
+  acknowledgedAt DateTime?
   referenceNo   String?
   lastFollowUpAt DateTime?
   nextFollowUpAt DateTime?
@@ -495,14 +880,27 @@ model EnrollmentApplication {
   revalidationAt DateTime?
   decisionAt    DateTime?
   decisionReason String?
+  terminatedAt  DateTime?
+  terminationReason String?
+  /// Linked evidence documents (must be AVAILABLE to count as trusted).
+  submissionEvidenceDocumentId String?
+  acknowledgmentEvidenceDocumentId String?
+  decisionEvidenceDocumentId String?
   checklist     Json?
   notes         String?
+  /// GPA-only internal notes — never expose on client/provider APIs.
+  internalNotes String?
   highlighted   Boolean  @default(false)
   statusHistory StatusHistory[]
   tasks         Task[]
   activities    EnrollmentActivity[]
   approvalDetails EnrollmentApprovalDetails?
   documents     Document[]
+  packets       EnrollmentPacket[]
+  submissions   EnrollmentSubmission[]
+  communications EnrollmentCommunication[]
+  externalIntegrationOperations ExternalIntegrationOperation[]
+  revalidations EnrollmentRevalidation[]
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
   @@index([status, nextFollowUpAt])
@@ -510,6 +908,11 @@ model EnrollmentApplication {
   @@index([providerId, payerPlanId])
   @@index([facilityId, status])
   @@index([highlighted])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, enrollmentType, status])
+  @@index([billingEntityId])
+  @@index([tenantId, providerId, payerPlanId, facilityId])
 }
 
 model EnrollmentActivity {
@@ -580,6 +983,8 @@ model Task {
   assignedTo     User? @relation("TaskAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
   createdById    String?
   createdBy      User? @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  tenantId       String?
+  tenant         Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   practiceId     String?
@@ -592,12 +997,35 @@ model Task {
   credentialingCase CredentialingCase? @relation(fields: [caseId], references: [id], onDelete: SetNull)
   enrollmentId   String?
   enrollment     EnrollmentApplication? @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  /// Phase 3C: distinguish generated credentialing gaps from ordinary tasks.
+  source         String?
+  /// Stable key to prevent duplicate open gaps for the same underlying issue.
+  fingerprint    String?
+  /// Related record type/id for gap navigation (non-sensitive).
+  relatedType    String?
+  relatedId      String?
+  /// Phase 4C follow-up typing (INITIAL_PAYER_CHECK, STATUS_CHECK, …).
+  followUpType   String?
+  completedAt    DateTime?
+  completionNotes String?
+  submissionId   String?
+  submission     EnrollmentSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
+  communicationId String?
+  communication  EnrollmentCommunication? @relation(fields: [communicationId], references: [id], onDelete: SetNull)
   comments       TaskComment[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
+  @@unique([tenantId, fingerprint])
   @@index([status, dueAt])
   @@index([organizationId, status])
   @@index([assignedToId, status])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([tenantId, source, status])
+  @@index([providerId, source, status])
+  @@index([tenantId, followUpType, status])
+  @@index([submissionId])
+  @@index([communicationId])
 }
 
 model TaskComment {
@@ -617,6 +1045,11 @@ model StatusHistory {
   toStatus     String
   changedBy    String?
   reason       String?
+  /// Phase 4A: typed enrollment/case event (e.g. APPLICATION_SUBMITTED).
+  eventType    String?
+  actorRole    String?
+  /// Non-sensitive metadata only (never passwords, Tax ID, SSN, banking).
+  metadata     Json?
   caseId       String?
   credentialingCase CredentialingCase? @relation(fields: [caseId], references: [id], onDelete: Cascade)
   enrollmentId String?
@@ -624,12 +1057,15 @@ model StatusHistory {
   createdAt    DateTime @default(now())
   @@index([caseId, createdAt])
   @@index([enrollmentId, createdAt])
+  @@index([eventType, createdAt])
 }
 
 model AuditEvent {
   id             String @id @default(cuid())
   actorId        String?
   actor          User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  tenantId       String?
+  tenant         Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   action         String
@@ -641,16 +1077,79 @@ model AuditEvent {
   createdAt      DateTime @default(now())
   @@index([entityType, entityId, createdAt])
   @@index([createdAt])
+  @@index([tenantId, createdAt])
 }
 
 enum IntakeStatus {
   DRAFT
   SENT
+  /// External provider invited (Phase 2B). Distinct from legacy SENT for staff workflows.
+  INVITED
   IN_PROGRESS
   SUBMITTED
   UNDER_REVIEW
+  CHANGES_REQUESTED
+  RESUBMITTED
+  APPROVED
+  REJECTED
   CONVERTED
+  EXPIRED
   CANCELLED
+}
+
+enum DocumentSecurityStatus {
+  UPLOADED
+  QUARANTINED
+  SCANNING
+  AVAILABLE
+  REJECTED
+  DELETED
+}
+
+enum ProviderIdentityMatch {
+  NEW
+  MATCHED
+  AMBIGUOUS
+  NONE
+}
+
+/// Shared verification lifecycle for structured professional history (Phase 3A).
+/// Document upload alone never implies VERIFIED.
+enum HistoryVerificationStatus {
+  NOT_SUBMITTED
+  PENDING_REVIEW
+  VERIFIED
+  REJECTED
+  EXPIRED
+  UNABLE_TO_VERIFY
+}
+
+enum ProfessionalHistorySection {
+  EDUCATION
+  RESIDENCY
+  FELLOWSHIP
+  BOARD_CERTIFICATION
+  PROFESSIONAL_CERTIFICATION
+  EMPLOYMENT
+  HOSPITAL_AFFILIATION
+  MALPRACTICE
+}
+
+enum HistoryCompletionStatus {
+  IN_PROGRESS
+  COMPLETED
+  WITHDRAWN
+  TRANSFERRED
+  OTHER
+}
+
+enum HistoryRecordStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+  CURRENT
+  EXPIRED
+  PENDING
 }
 
 enum IntakeKind {
@@ -666,17 +1165,35 @@ model IntakeRequest {
   referenceNo      String       @unique
   kind             IntakeKind   @default(PROVIDER)
   status           IntakeStatus @default(DRAFT)
+  tenantId         String?
+  tenant           Tenant?      @relation(fields: [tenantId], references: [id], onDelete: SetNull)
   organizationId   String?
   organization     Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   assignedToId     String?
   assignedTo       User?        @relation("IntakeAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
   createdById      String?
   createdBy        User?        @relation("IntakeCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  /// External provider user assigned to this intake (Phase 2B). Not a TenantMembership.
+  providerUserId   String?
+  providerUser     User?        @relation("IntakeProviderUser", fields: [providerUserId], references: [id], onDelete: SetNull)
+  invitedEmail     String?
   contactName      String?
   contactEmail     String?
   contactPhone     String?
+  /// Working draft payload (provider editable while draft / changes requested).
   payload          Json?
+  /// Latest submitted snapshot (denormalized for convenience). Historical versions in IntakeSubmission.
+  submittedPayload Json?
+  /// Version number of the latest IntakeSubmission row.
+  currentSubmissionVersion Int @default(0)
   missingFields    Json?
+  /// Client-visible review comments (safe for provider + client portal).
+  reviewerComments String?
+  /// GPA-only notes — never exposed to EXTERNAL_PROVIDER or CLIENT_USER.
+  internalNotes    String?
+  rejectionReason  String?
+  identityMatch    ProviderIdentityMatch @default(NONE)
+  matchedProviderId String?
   convertedProviderId  String?
   convertedPracticeId  String?
   convertedFacilityId  String?
@@ -684,14 +1201,45 @@ model IntakeRequest {
   sentAt           DateTime?
   submittedAt      DateTime?
   reviewedAt       DateTime?
+  changesRequestedAt DateTime?
+  approvedAt       DateTime?
+  rejectedAt       DateTime?
   convertedAt      DateTime?
+  lastSavedAt      DateTime?
   notes            String?
   events           IntakeEvent[]
+  invitations      ProviderIntakeInvitation[]
+  documents        Document[]
+  submissions      IntakeSubmission[]
   createdAt        DateTime     @default(now())
   updatedAt        DateTime     @updatedAt
   @@index([status, createdAt])
   @@index([organizationId, status])
   @@index([assignedToId, status])
+  @@index([tenantId])
+  @@index([tenantId, status])
+  @@index([providerUserId, status])
+  @@index([invitedEmail])
+}
+
+/// Immutable submission versions for provider intake (Phase 2C).
+/// Each submit/resubmit appends a row; prior versions are never overwritten.
+model IntakeSubmission {
+  id              String   @id @default(cuid())
+  intakeRequestId String
+  intakeRequest   IntakeRequest @relation(fields: [intakeRequestId], references: [id], onDelete: Cascade)
+  version         Int
+  payload         Json
+  submittedById   String?
+  submittedAt     DateTime @default(now())
+  /// Reviewer action against this version, if any.
+  reviewAction    String?
+  reviewComments  String?
+  reviewedAt      DateTime?
+  reviewedById    String?
+  createdAt       DateTime @default(now())
+  @@unique([intakeRequestId, version])
+  @@index([intakeRequestId, submittedAt])
 }
 
 model IntakeEvent {
@@ -791,4 +1339,1175 @@ model Notification {
   readAt    DateTime?
   createdAt DateTime @default(now())
   @@index([userId, readAt, createdAt])
+}
+
+/// Platform-global vs tenant-owned directory ownership.
+enum DirectoryScope {
+  PLATFORM
+  TENANT
+}
+
+/// Standardized US state / DC reference (platform-global).
+model UsState {
+  id           String       @id @default(cuid())
+  name         String
+  abbreviation String       @unique
+  fipsCode     String?      @unique
+  status       RecordStatus @default(ACTIVE)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  licenses     License[]
+  @@index([status])
+}
+
+/// Platform medical specialty catalog.
+model Specialty {
+  id          String       @id @default(cuid())
+  name        String       @unique
+  code        String?      @unique
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  providers   ProviderSpecialty[]
+  primaryFor  Provider[]   @relation("ProviderPrimarySpecialty")
+  secondaryFor Provider[]  @relation("ProviderSecondarySpecialty")
+  residencies ProviderResidency[]
+  fellowships ProviderFellowship[]
+  boardCertifications ProviderBoardCertification[]
+  @@index([status])
+}
+
+model ProviderSpecialty {
+  id          String    @id @default(cuid())
+  providerId  String
+  provider    Provider  @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  specialtyId String
+  specialty   Specialty @relation(fields: [specialtyId], references: [id], onDelete: Restrict)
+  isPrimary   Boolean   @default(false)
+  isSecondary Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  @@unique([providerId, specialtyId])
+  @@index([specialtyId])
+}
+
+model LicenseType {
+  id                   String       @id @default(cuid())
+  code                 String       @unique
+  name                 String
+  description          String?
+  profession           String?
+  applicableStateCodes Json?
+  status               RecordStatus @default(ACTIVE)
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+  licenses             License[]
+  @@index([status])
+  @@index([profession, status])
+}
+
+model DegreeType {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  educationHistory ProviderEducation[]
+  @@index([status])
+}
+
+model EducationType {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  @@index([status])
+}
+
+model ResidencyType {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  @@index([status])
+}
+
+model FellowshipType {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  @@index([status])
+}
+
+model BoardCertificationCategory {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  boardCertifications ProviderBoardCertification[]
+  @@index([status])
+}
+
+model CertificationType {
+  id          String       @id @default(cuid())
+  code        String       @unique
+  name        String
+  description String?
+  status      RecordStatus @default(ACTIVE)
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  professionalCertifications ProviderProfessionalCertification[]
+  @@index([status])
+}
+
+/// Credential document categories. Platform rows mirror legacy DOCUMENT_CATEGORIES keys.
+/// Tenant rows are client-specific custom categories and never leak across tenants.
+model CredentialCategory {
+  id                      String         @id @default(cuid())
+  scope                   DirectoryScope @default(PLATFORM)
+  tenantId                String?
+  tenant                  Tenant?        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  code                    String
+  name                    String
+  description             String?
+  requiredDefault         Boolean        @default(false)
+  tracksExpiration        Boolean        @default(false)
+  defaultWarningDays      Int?
+  applicableProviderTypes Json?
+  applicableSpecialties   Json?
+  documentTypes           Json?
+  sortOrder               Int            @default(0)
+  status                  RecordStatus   @default(ACTIVE)
+  createdAt               DateTime       @default(now())
+  updatedAt               DateTime       @updatedAt
+  /// Uniqueness for platform codes and tenant codes is enforced in SQL partial indexes + service layer.
+  @@index([scope, code])
+  @@index([tenantId, code])
+  @@index([scope, status])
+  @@index([tenantId, status])
+}
+
+/// Tenant-owned payer operational contacts (isolated per client).
+model PayerContact {
+  id           String       @id @default(cuid())
+  tenantId     String
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payerId      String
+  payer        Payer        @relation(fields: [payerId], references: [id], onDelete: Cascade)
+  payerPlanId  String?
+  payerPlan    PayerPlan?   @relation(fields: [payerPlanId], references: [id], onDelete: SetNull)
+  name         String
+  department   String?
+  jobTitle     String?
+  phone        String?
+  fax          String?
+  email        String?
+  address      Json?
+  contactType  String?
+  notes        String?
+  status       RecordStatus @default(ACTIVE)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  @@index([tenantId, payerId])
+  @@index([tenantId, status])
+  @@index([payerPlanId])
+}
+
+/// Distinct from Organization/Practice. Tenant-owned billing/legal entity.
+model BillingEntity {
+  id              String       @id @default(cuid())
+  tenantId        String
+  tenant          Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organizationId  String?
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  legalName       String
+  dba             String?
+  taxId           String?
+  npi             String?
+  entityType      String?
+  billingAddress  Json?
+  mailingAddress  Json?
+  contactName     String?
+  contactTitle    String?
+  phone           String?
+  fax             String?
+  email           String?
+  status          RecordStatus @default(ACTIVE)
+  practices       BillingEntityPractice[]
+  enrollments     EnrollmentApplication[]
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+  @@index([tenantId, status])
+  @@index([organizationId])
+  @@index([tenantId, legalName])
+}
+
+model BillingEntityPractice {
+  billingEntityId String
+  practiceId      String
+  billingEntity   BillingEntity @relation(fields: [billingEntityId], references: [id], onDelete: Cascade)
+  practice        Practice      @relation(fields: [practiceId], references: [id], onDelete: Cascade)
+  createdAt       DateTime      @default(now())
+  @@id([billingEntityId, practiceId])
+  @@index([practiceId])
+}
+
+/// Structured payer/plan requirement definitions (Phase 1A catalog + Phase 4B engine).
+/// Does not replace PayerPlan.checklist — checklist JSON is preserved.
+/// Requirements must be configured from verified payer sources or authorized GPA decisions.
+model PayerRequirement {
+  id                    String         @id @default(cuid())
+  scope                 DirectoryScope @default(PLATFORM)
+  tenantId              String?
+  tenant                Tenant?        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  payerId               String?
+  payer                 Payer?         @relation(fields: [payerId], references: [id], onDelete: Cascade)
+  payerPlanId           String?
+  payerPlan             PayerPlan?     @relation(fields: [payerPlanId], references: [id], onDelete: Cascade)
+  code                  String?
+  title                 String
+  description           String?
+  /// Category example: PROVIDER_DEMOGRAPHIC, NPI, SPECIALTY, STATE_LICENSE, DEA, BOARD_CERTIFICATION, EDUCATION, RESIDENCY, FELLOWSHIP, PROFESSIONAL_HISTORY, MALPRACTICE, TAX_W9, GROUP_PRACTICE, BILLING_ENTITY, FACILITY, PAYER_APPLICATION_FORM, CORRESPONDENCE, OTHER
+  category              String?
+  requirementKind       String?
+  /// When true, missing item blocks packet readiness. Optional items remain visible.
+  isRequired            Boolean        @default(true)
+  /// Enrollment types this applies to (empty/null = all): INDIVIDUAL, GROUP, FACILITY, REASSIGNMENT, OTHER
+  enrollmentTypes       Json?
+  appliesToProviderTypes Json?
+  appliesToSpecialties  Json?
+  appliesToStates       Json?
+  appliesToFacility     Boolean        @default(false)
+  appliesToGroup        Boolean        @default(false)
+  documentCategoryCode  String?
+  tracksExpiration      Boolean        @default(false)
+  /// Restricted condition schema (no executable code). Validated by requirementConditions service.
+  conditions            Json?
+  effectiveFrom         DateTime?
+  effectiveTo           DateTime?
+  version               Int            @default(1)
+  source                String?
+  sourceReference       String?
+  sourceVerifiedAt      DateTime?
+  lastReviewedById      String?
+  lastReviewedBy        User?          @relation("PayerRequirementReviewer", fields: [lastReviewedById], references: [id], onDelete: SetNull)
+  lastReviewedAt        DateTime?
+  instructions          String?
+  sortOrder             Int            @default(0)
+  status                RecordStatus   @default(ACTIVE)
+  metadata              Json?
+  history               PayerRequirementHistory[]
+  packetItems           EnrollmentPacketItem[]
+  createdAt             DateTime       @default(now())
+  updatedAt             DateTime       @updatedAt
+  @@index([scope, status])
+  @@index([tenantId, status])
+  @@index([payerId, status])
+  @@index([payerPlanId, status])
+  @@index([scope, payerPlanId, code])
+  @@index([code, version, status])
+  @@index([effectiveFrom, effectiveTo])
+}
+
+/// Append-only requirement change history (version snapshots).
+model PayerRequirementHistory {
+  id            String   @id @default(cuid())
+  requirementId String
+  requirement   PayerRequirement @relation(fields: [requirementId], references: [id], onDelete: Cascade)
+  version       Int
+  snapshot      Json
+  changedById   String?
+  changeReason  String?
+  createdAt     DateTime @default(now())
+  @@index([requirementId, version])
+  @@index([requirementId, createdAt])
+}
+
+enum EnrollmentPacketStatus {
+  NOT_EVALUATED
+  INCOMPLETE
+  EVIDENCE_PENDING
+  REVIEW_REQUIRED
+  READY_FOR_INTERNAL_SUBMISSION_REVIEW
+  BLOCKED
+}
+
+enum PacketItemStatus {
+  NOT_STARTED
+  MISSING
+  INFORMATION_AVAILABLE
+  EVIDENCE_ATTACHED
+  PENDING_REVIEW
+  VERIFIED
+  REJECTED
+  EXPIRED
+  NOT_APPLICABLE
+  WAIVED
+}
+
+/// Frozen enrollment requirement packet (Phase 4B). Snapshot preserves historical integrity.
+/// READY_FOR_INTERNAL_SUBMISSION_REVIEW ≠ payer submission/approval/effective.
+model EnrollmentPacket {
+  id                 String                 @id @default(cuid())
+  enrollmentId       String
+  enrollment         EnrollmentApplication  @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  tenantId           String
+  tenant             Tenant                 @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  version            Int                    @default(1)
+  status             EnrollmentPacketStatus @default(NOT_EVALUATED)
+  payerId            String?
+  payerPlanId        String
+  enrollmentType     String
+  /// Exact applicable requirements at evaluation time (codes, versions, titles, required flags).
+  requirementSnapshot Json
+  evaluationSummary  Json?
+  conflictNotes      String?
+  createdById        String?
+  createdBy          User?                  @relation("EnrollmentPacketCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  evaluatedAt        DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+  items              EnrollmentPacketItem[]
+  submissions        EnrollmentSubmission[]
+  @@unique([enrollmentId, version])
+  @@index([tenantId, enrollmentId])
+  @@index([tenantId, status])
+  @@index([enrollmentId, status])
+}
+
+model EnrollmentPacketItem {
+  id                   String          @id @default(cuid())
+  packetId             String
+  packet               EnrollmentPacket @relation(fields: [packetId], references: [id], onDelete: Cascade)
+  payerRequirementId   String?
+  payerRequirement     PayerRequirement? @relation(fields: [payerRequirementId], references: [id], onDelete: SetNull)
+  requirementCode      String?
+  requirementTitle     String
+  category             String?
+  isRequired           Boolean         @default(true)
+  sortOrder            Int             @default(0)
+  status               PacketItemStatus @default(NOT_STARTED)
+  applicabilityReason  String?
+  /// PROVIDER_NPI | SPECIALTY | LICENSE | DOCUMENT | EDUCATION | RESIDENCY | FELLOWSHIP | BOARD_CERTIFICATION | EMPLOYMENT | HOSPITAL_AFFILIATION | MALPRACTICE | ORGANIZATION | PRACTICE | BILLING_ENTITY | FACILITY | MANUAL
+  sourceType           String?
+  sourceRecordId       String?
+  sourceLabel          String?
+  documentId           String?
+  document             Document?       @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  expiresAt            DateTime?
+  reviewNotes          String?
+  /// GPA-only internal notes — never expose to client/provider.
+  internalNotes        String?
+  rejectionReason      String?
+  waiverReason         String?
+  waivedById           String?
+  waivedAt             DateTime?
+  verifiedById         String?
+  verifiedAt           DateTime?
+  requirementVersion   Int?
+  /// Frozen requirement fields at packet evaluation.
+  snapshot             Json?
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+  events               EnrollmentPacketItemEvent[]
+  @@index([packetId, status])
+  @@index([packetId, requirementCode])
+  @@index([documentId])
+  @@index([payerRequirementId])
+}
+
+model EnrollmentPacketItemEvent {
+  id         String   @id @default(cuid())
+  itemId     String
+  item       EnrollmentPacketItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  eventType  String
+  fromStatus String?
+  toStatus   String?
+  actorId    String?
+  actorRole  String?
+  reason     String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+  @@index([itemId, createdAt])
+}
+
+/// Phase 4C — manual submission attempt tracking (not automated payer integration).
+enum EnrollmentSubmissionStatus {
+  PREPARED
+  CONFIRMED
+  CANCELLED
+}
+
+model EnrollmentSubmission {
+  id                   String                     @id @default(cuid())
+  enrollmentId         String
+  enrollment           EnrollmentApplication      @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  tenantId             String
+  tenant               Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  attemptNumber        Int
+  packetId             String?
+  packet               EnrollmentPacket?          @relation(fields: [packetId], references: [id], onDelete: SetNull)
+  packetVersion        Int?
+  /// PAYER_PORTAL_MANUAL | FAX | MAIL | EMAIL | PHONE | OTHER
+  channel              String
+  channelExplanation   String?
+  submittedAt          DateTime?
+  submittedById        String?
+  submittedBy          User?                      @relation("EnrollmentSubmissionCreator", fields: [submittedById], references: [id], onDelete: SetNull)
+  confirmedById        String?
+  confirmedBy          User?                      @relation("EnrollmentSubmissionConfirmer", fields: [confirmedById], references: [id], onDelete: SetNull)
+  confirmedAt          DateTime?
+  referenceNo          String?
+  evidenceDocumentId   String?
+  evidenceDocument     Document?                  @relation(fields: [evidenceDocumentId], references: [id], onDelete: SetNull)
+  notes                String?
+  /// GPA-only confirmation / exception notes.
+  internalNotes        String?
+  confirmationStatus   EnrollmentSubmissionStatus @default(PREPARED)
+  /// Explicit user confirmation that the application was actually sent.
+  confirmedSent        Boolean                    @default(false)
+  overrideReason       String?
+  createdAt            DateTime                   @default(now())
+  updatedAt            DateTime                   @updatedAt
+  communications       EnrollmentCommunication[]
+  tasks                Task[]
+  @@unique([enrollmentId, attemptNumber])
+  @@index([tenantId, enrollmentId])
+  @@index([enrollmentId, submittedAt])
+  @@index([tenantId, confirmationStatus])
+  @@index([packetId])
+  @@index([evidenceDocumentId])
+}
+
+model EnrollmentCommunication {
+  id                 String                @id @default(cuid())
+  enrollmentId       String
+  enrollment         EnrollmentApplication @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  tenantId           String
+  tenant             Tenant                @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  submissionId       String?
+  submission         EnrollmentSubmission? @relation(fields: [submissionId], references: [id], onDelete: SetNull)
+  /// SUBMISSION_CONFIRMATION | RECEIPT_ACKNOWLEDGEMENT | STATUS_INQUIRY | …
+  communicationType  String
+  /// PHONE | EMAIL | FAX | PAYER_PORTAL_MANUAL | MAIL | OTHER
+  channel            String
+  channelExplanation String?
+  occurredAt         DateTime              @default(now())
+  contactName        String?
+  contactDepartment  String?
+  referenceNo        String?
+  summary            String
+  notes              String?
+  /// GPA-only — never expose to client/provider.
+  internalNotes      String?
+  evidenceDocumentId String?
+  evidenceDocument   Document?             @relation(fields: [evidenceDocumentId], references: [id], onDelete: SetNull)
+  createdById        String?
+  createdBy          User?                 @relation("EnrollmentCommunicationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  tasks              Task[]
+  @@index([tenantId, enrollmentId])
+  @@index([enrollmentId, createdAt])
+  @@index([communicationType, createdAt])
+  @@index([submissionId])
+  @@index([evidenceDocumentId])
+}
+
+/// Phase 1C — structured directory / reference-data quality issues.
+enum DataQualityIssueType {
+  DUPLICATE_EXACT
+  DUPLICATE_STRONG
+  DUPLICATE_POSSIBLE
+  BROKEN_RELATIONSHIP
+  UNMAPPED_LEGACY
+  INVALID_REFERENCE
+  MISSING_REQUIRED
+  INCONSISTENT_STATUS
+  NPI_INVALID
+  SPECIALTY_CONFLICT
+  CATEGORY_INCONSISTENCY
+  OTHER
+}
+
+enum DataQualitySeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum DataQualityIssueStatus {
+  OPEN
+  UNDER_REVIEW
+  RESOLVED
+  ACCEPTED_LEGITIMATE
+  REOPENED
+}
+
+model DataQualityIssue {
+  id              String                   @id @default(cuid())
+  /// Null = platform-global issue (specialties, payers, etc.).
+  tenantId        String?
+  tenant          Tenant?                  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  issueType       DataQualityIssueType
+  severity        DataQualitySeverity      @default(MEDIUM)
+  status          DataQualityIssueStatus   @default(OPEN)
+  /// Logical directory key: specialties | usStates | licenseTypes | payers | plans | billingEntities | credentialCategories | providers | licenses | documents | enrollments
+  directoryType   String
+  recordId        String?
+  /// Second record for duplicate pairs.
+  relatedRecordId String?
+  /// Stable fingerprint to prevent duplicate open issues for the same problem.
+  fingerprint     String
+  title           String
+  description     String?
+  /// Non-sensitive detection payload (counts, normalized keys, field diffs). Never store raw Tax ID/SSN.
+  details         Json?
+  assignedToId    String?
+  assignedTo      User?                    @relation("DataQualityAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  resolvedById    String?
+  resolvedBy      User?                    @relation("DataQualityResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  resolutionNotes String?
+  detectedAt      DateTime                 @default(now())
+  resolvedAt      DateTime?
+  createdAt       DateTime                 @default(now())
+  updatedAt       DateTime                 @updatedAt
+  @@unique([fingerprint])
+  @@index([tenantId, status])
+  @@index([directoryType, status])
+  @@index([issueType, status])
+  @@index([severity, status])
+  @@index([detectedAt])
+}
+
+/// ---------------------------------------------------------------------------
+/// Phase 3A � Structured provider professional history (tenant-scoped)
+/// Ownership boundary: tenantId + providerId must have TenantProvider link.
+/// ---------------------------------------------------------------------------
+
+model ProviderEducation {
+  id              String                     @id @default(cuid())
+  tenantId        String
+  tenant          Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId      String
+  provider        Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  institutionName String
+  degreeTypeId    String?
+  degreeType      DegreeType?                @relation(fields: [degreeTypeId], references: [id], onDelete: SetNull)
+  degreeName      String?
+  fieldOfStudy    String?
+  startDate       DateTime?
+  endDate         DateTime?
+  graduationDate  DateTime?
+  country         String?
+  state           String?
+  city            String?
+  verificationStatus HistoryVerificationStatus @default(PENDING_REVIEW)
+  verifiedAt      DateTime?
+  verifiedById    String?
+  rejectionReason String?
+  reviewerNotes   String?
+  notes           String?
+  documentId      String?
+  recordStatus    HistoryRecordStatus        @default(ACTIVE)
+  sourceIntakeId  String?
+  createdAt       DateTime                   @default(now())
+  updatedAt       DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([degreeTypeId])
+  @@index([graduationDate])
+}
+
+model ProviderResidency {
+  id               String                     @id @default(cuid())
+  tenantId         String
+  tenant           Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId       String
+  provider         Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  institutionName  String
+  programName      String?
+  specialtyId      String?
+  specialty        Specialty?                 @relation(fields: [specialtyId], references: [id], onDelete: SetNull)
+  specialtyName    String?
+  startDate        DateTime?
+  endDate          DateTime?
+  completionStatus HistoryCompletionStatus    @default(COMPLETED)
+  country          String?
+  state            String?
+  city             String?
+  programDirector  String?
+  contactInfo      String?
+  verificationStatus HistoryVerificationStatus @default(PENDING_REVIEW)
+  verifiedAt       DateTime?
+  verifiedById     String?
+  rejectionReason  String?
+  reviewerNotes    String?
+  notes            String?
+  documentId       String?
+  recordStatus     HistoryRecordStatus        @default(ACTIVE)
+  sourceIntakeId   String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([specialtyId])
+}
+
+model ProviderFellowship {
+  id               String                     @id @default(cuid())
+  tenantId         String
+  tenant           Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId       String
+  provider         Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  institutionName  String
+  programName      String?
+  specialtyId      String?
+  specialty        Specialty?                 @relation(fields: [specialtyId], references: [id], onDelete: SetNull)
+  specialtyName    String?
+  startDate        DateTime?
+  endDate          DateTime?
+  completionStatus HistoryCompletionStatus    @default(COMPLETED)
+  country          String?
+  state            String?
+  city             String?
+  verificationStatus HistoryVerificationStatus @default(PENDING_REVIEW)
+  verifiedAt       DateTime?
+  verifiedById     String?
+  rejectionReason  String?
+  reviewerNotes    String?
+  notes            String?
+  documentId       String?
+  recordStatus     HistoryRecordStatus        @default(ACTIVE)
+  sourceIntakeId   String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([specialtyId])
+}
+
+model ProviderBoardCertification {
+  id                 String                     @id @default(cuid())
+  tenantId           String
+  tenant             Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId         String
+  provider           Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  categoryId         String?
+  category           BoardCertificationCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  certifyingBoard    String
+  specialtyId        String?
+  specialty          Specialty?                 @relation(fields: [specialtyId], references: [id], onDelete: SetNull)
+  specialtyName      String?
+  certificationNumber String?
+  issueDate          DateTime?
+  expirationDate     DateTime?
+  doesNotExpire      Boolean                    @default(false)
+  status             HistoryRecordStatus        @default(ACTIVE)
+  verificationStatus HistoryVerificationStatus  @default(PENDING_REVIEW)
+  verifiedAt         DateTime?
+  verifiedById       String?
+  rejectionReason    String?
+  reviewerNotes      String?
+  notes              String?
+  documentId         String?
+  sourceIntakeId     String?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([expirationDate])
+  @@index([categoryId])
+}
+
+model ProviderProfessionalCertification {
+  id                  String                     @id @default(cuid())
+  tenantId            String
+  tenant              Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId          String
+  provider            Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  certificationName   String
+  certificationTypeId String?
+  certificationType   CertificationType?         @relation(fields: [certificationTypeId], references: [id], onDelete: SetNull)
+  certificationTypeName String?
+  issuingOrganization String?
+  certificateNumber   String?
+  issueDate           DateTime?
+  expirationDate      DateTime?
+  status              HistoryRecordStatus        @default(ACTIVE)
+  verificationStatus  HistoryVerificationStatus  @default(PENDING_REVIEW)
+  verifiedAt          DateTime?
+  verifiedById        String?
+  rejectionReason     String?
+  reviewerNotes       String?
+  notes               String?
+  documentId          String?
+  sourceIntakeId      String?
+  createdAt           DateTime                   @default(now())
+  updatedAt           DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([expirationDate])
+  @@index([certificationTypeId])
+}
+
+model ProviderEmployment {
+  id               String                     @id @default(cuid())
+  tenantId         String
+  tenant           Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId       String
+  provider         Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  employerName     String
+  employerType     String?
+  positionTitle    String?
+  specialtyOrDept  String?
+  startDate        DateTime?
+  endDate          DateTime?
+  isCurrent        Boolean                    @default(false)
+  country          String?
+  state            String?
+  city             String?
+  locationText     String?
+  supervisorName   String?
+  contactInfo      String?
+  /// Restricted � never expose to EXTERNAL_PROVIDER or CLIENT_USER.
+  reasonForLeaving String?
+  verificationStatus HistoryVerificationStatus @default(PENDING_REVIEW)
+  verifiedAt       DateTime?
+  verifiedById     String?
+  rejectionReason  String?
+  reviewerNotes    String?
+  notes            String?
+  documentId       String?
+  recordStatus     HistoryRecordStatus        @default(ACTIVE)
+  sourceIntakeId   String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, isCurrent])
+  @@index([providerId, verificationStatus])
+}
+
+model ProviderHospitalAffiliation {
+  id               String                     @id @default(cuid())
+  tenantId         String
+  tenant           Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId       String
+  provider         Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  /// Link to GPA Facility when in-tenant; otherwise use hospitalName for external hospitals.
+  facilityId       String?
+  facility         Facility?                  @relation(fields: [facilityId], references: [id], onDelete: SetNull)
+  hospitalName     String?
+  affiliationType  String?
+  department       String?
+  effectiveDate    DateTime?
+  expirationDate   DateTime?
+  status           HistoryRecordStatus        @default(ACTIVE)
+  /// Privilege status is independent of affiliation existence.
+  privilegeStatus  String?
+  verificationStatus HistoryVerificationStatus @default(PENDING_REVIEW)
+  verifiedAt       DateTime?
+  verifiedById     String?
+  rejectionReason  String?
+  reviewerNotes    String?
+  notes            String?
+  documentId       String?
+  sourceIntakeId   String?
+  createdAt        DateTime                   @default(now())
+  updatedAt        DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, verificationStatus])
+  @@index([facilityId])
+  @@index([expirationDate])
+}
+
+model ProviderMalpracticePolicy {
+  id                    String                     @id @default(cuid())
+  tenantId              String
+  tenant                Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId            String
+  provider              Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  insuranceCarrier      String
+  /// Sensitive � masked for non-reviewer roles.
+  policyNumber          String?
+  coverageType          String?
+  perOccurrenceAmount   Decimal?                   @db.Decimal(14, 2)
+  aggregateAmount       Decimal?                   @db.Decimal(14, 2)
+  effectiveDate         DateTime?
+  expirationDate        DateTime?
+  retroactiveDate       DateTime?
+  hasTailCoverage       Boolean?
+  tailCoverageNotes     String?
+  isCurrent             Boolean                    @default(false)
+  status                HistoryRecordStatus        @default(ACTIVE)
+  verificationStatus    HistoryVerificationStatus  @default(PENDING_REVIEW)
+  verifiedAt            DateTime?
+  verifiedById          String?
+  rejectionReason       String?
+  reviewerNotes         String?
+  notes                 String?
+  documentId            String?
+  sourceIntakeId        String?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  @@index([tenantId, providerId])
+  @@index([providerId, isCurrent])
+  @@index([providerId, verificationStatus])
+  @@index([expirationDate])
+}
+
+model ProfessionalHistoryDocument {
+  id         String                     @id @default(cuid())
+  tenantId   String
+  tenant     Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  section    ProfessionalHistorySection
+  recordId   String
+  documentId String
+  createdAt  DateTime                   @default(now())
+  @@unique([section, recordId, documentId])
+  @@index([tenantId, providerId])
+  @@index([documentId])
+  @@index([section, recordId])
+}
+
+model ProfessionalHistoryVerificationEvent {
+  id         String                     @id @default(cuid())
+  tenantId   String
+  tenant     Tenant                     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId String
+  provider   Provider                   @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  section    ProfessionalHistorySection
+  recordId   String
+  action     String
+  fromStatus HistoryVerificationStatus?
+  toStatus   HistoryVerificationStatus
+  reason     String?
+  actorId    String?
+  detail     Json?
+  createdAt  DateTime                   @default(now())
+  @@index([tenantId, providerId, createdAt])
+  @@index([section, recordId, createdAt])
+}
+
+/// Phase 3C — Internal provider credentialing profile review (not payer approval).
+model ProviderProfileReview {
+  id                   String              @id @default(cuid())
+  tenantId             String
+  tenant               Tenant              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId           String
+  provider             Provider            @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  status               ProfileReviewStatus @default(NOT_STARTED)
+  startedAt            DateTime?
+  startedById          String?
+  completedAt          DateTime?
+  completedById        String?
+  correctionsRequestedAt DateTime?
+  resubmittedAt        DateTime?
+  /// Safe notes visible to client/provider when corrections are requested.
+  clientVisibleNotes   String?
+  /// GPA-only internal review notes � never expose on client/provider APIs.
+  internalNotes        String?
+  /// Snapshot of readiness overall/dimensions at last assessment (non-sensitive).
+  readinessSnapshot    Json?
+  createdAt            DateTime            @default(now())
+  updatedAt            DateTime            @updatedAt
+  @@index([tenantId, providerId, status])
+  @@index([tenantId, status])
+  @@index([providerId, updatedAt])
+}
+
+/// Phase 3D � On-demand credentialing QA scan run (not a background scheduler).
+model CredentialingQaScan {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  tenant              Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  startedAt           DateTime @default(now())
+  completedAt         DateTime?
+  startedById         String?
+  /// RUNNING | COMPLETED | FAILED | PARTIAL
+  status              String   @default("RUNNING")
+  recordsInspected    Int      @default(0)
+  providersInspected  Int      @default(0)
+  findingsCreated     Int      @default(0)
+  findingsUpdated     Int      @default(0)
+  findingsBySeverity  Json?
+  /// Non-sensitive summary / limits / continuation cursor.
+  summary             Json?
+  /// Safe error message � never store secrets or full license numbers.
+  errorMessage        String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  @@index([tenantId, startedAt])
+  @@index([tenantId, status])
+}
+
+/// Phase 4D � external credentialing integration registry (foundation only).
+/// CONNECTED requires an actual successful connection test. Manual portal ? API connected.
+enum ExternalIntegrationType {
+  CAQH
+  PECOS
+  AVAILITY
+  PAYER_PORTAL
+  OTHER
+}
+
+enum ExternalIntegrationStatus {
+  NOT_CONFIGURED
+  PENDING_APPROVAL
+  PENDING_CREDENTIALS
+  READY_FOR_CONNECTION_TEST
+  CONNECTED
+  DEGRADED
+  DISCONNECTED
+  DISABLED
+  NOT_SUPPORTED
+  MANUAL_ONLY
+  /// Isolated automated-test mock success only — never a live verified connection.
+  TEST_MOCK_SUCCEEDED
+}
+
+enum ExternalConnectionMode {
+  OFFICIAL_API
+  AUTHORIZED_PARTNER
+  MANUAL_PORTAL
+  FILE_IMPORT_EXPORT
+  NOT_AVAILABLE
+}
+
+enum ProviderIntegrationAuthStatus {
+  NOT_REQUESTED
+  REQUESTED
+  GRANTED
+  EXPIRED
+  REVOKED
+  REJECTED
+}
+
+enum ExternalOperationStatus {
+  QUEUED
+  IN_PROGRESS
+  SUCCEEDED
+  FAILED
+  CANCELLED
+  NOT_SUPPORTED
+  REQUIRES_MANUAL_ACTION
+}
+
+model ExternalIntegration {
+  id                   String                    @id @default(cuid())
+  /// null = platform-wide catalog/config; set = tenant-specific configuration.
+  tenantId             String?
+  tenant               Tenant?                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integrationType      ExternalIntegrationType
+  displayName          String
+  systemName           String
+  status               ExternalIntegrationStatus @default(NOT_CONFIGURED)
+  connectionMode       ExternalConnectionMode    @default(NOT_AVAILABLE)
+  /// Capability map: { CAPABILITY: { status, source, notes } }
+  capabilities         Json                      @default("{}")
+  /// Opaque secret reference only (e.g. env:KEY or aws:arn/name). Never plaintext secrets.
+  credentialSecretRef  String?
+  credentialConfiguredAt DateTime?
+  credentialConfiguredById String?
+  credentialConfiguredBy User?                   @relation("ExternalIntegrationConfigurator", fields: [credentialConfiguredById], references: [id], onDelete: SetNull)
+  feasibilityNotes     String?
+  officialSourceUrl    String?
+  lastVerifiedAt       DateTime?
+  lastTestedAt         DateTime?
+  lastSuccessfulSyncAt DateTime?
+  lastErrorAt          DateTime?
+  lastErrorCode        String?
+  lastErrorSummary     String?
+  createdAt            DateTime                  @default(now())
+  updatedAt            DateTime                  @updatedAt
+  authorizations       ProviderIntegrationAuthorization[]
+  operations           ExternalIntegrationOperation[]
+  @@index([tenantId, integrationType])
+  @@index([integrationType, status])
+  @@index([status])
+  @@index([credentialConfiguredById])
+}
+
+model ProviderIntegrationAuthorization {
+  id                 String                         @id @default(cuid())
+  tenantId           String
+  tenant             Tenant                         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  providerId         String
+  provider           Provider                       @relation(fields: [providerId], references: [id], onDelete: Cascade)
+  integrationId      String
+  integration        ExternalIntegration            @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  authorizationType  String                         @default("DELEGATION")
+  status             ProviderIntegrationAuthStatus  @default(NOT_REQUESTED)
+  grantedAt          DateTime?
+  expiresAt          DateTime?
+  revokedAt          DateTime?
+  grantedById        String?
+  grantedBy          User?                          @relation("ProviderIntegrationAuthGranter", fields: [grantedById], references: [id], onDelete: SetNull)
+  evidenceDocumentId String?
+  evidenceDocument   Document?                      @relation(fields: [evidenceDocumentId], references: [id], onDelete: SetNull)
+  externalReference  String?
+  /// Capability scopes authorized (string array in JSON).
+  scope              Json                           @default("[]")
+  notes              String?
+  createdAt          DateTime                       @default(now())
+  updatedAt          DateTime                       @updatedAt
+  events             ProviderIntegrationAuthorizationEvent[]
+  @@index([tenantId, providerId])
+  @@index([providerId, integrationId])
+  @@index([integrationId, status])
+  @@index([status, expiresAt])
+  @@index([evidenceDocumentId])
+}
+
+model ProviderIntegrationAuthorizationEvent {
+  id               String                           @id @default(cuid())
+  authorizationId  String
+  authorization    ProviderIntegrationAuthorization @relation(fields: [authorizationId], references: [id], onDelete: Cascade)
+  fromStatus       ProviderIntegrationAuthStatus?
+  toStatus         ProviderIntegrationAuthStatus
+  actorId          String?
+  actor            User?                            @relation("ProviderIntegrationAuthEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  reason           String?
+  metadata         Json?
+  createdAt        DateTime                         @default(now())
+  @@index([authorizationId, createdAt])
+}
+
+model ExternalIntegrationOperation {
+  id                String                   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant                   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  integrationId     String
+  integration       ExternalIntegration      @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  providerId        String?
+  provider          Provider?                @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  enrollmentId      String?
+  enrollment        EnrollmentApplication?   @relation(fields: [enrollmentId], references: [id], onDelete: SetNull)
+  operationType     String
+  operationStatus   ExternalOperationStatus  @default(QUEUED)
+  externalReference String?
+  idempotencyKey    String?
+  startedAt         DateTime                 @default(now())
+  completedAt       DateTime?
+  initiatedById     String?
+  initiatedBy       User?                    @relation("ExternalIntegrationOperationInitiator", fields: [initiatedById], references: [id], onDelete: SetNull)
+  safeErrorCode     String?
+  safeErrorSummary  String?
+  /// Non-sensitive metadata only � never store secrets or full PHI payloads.
+  metadata          Json?
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, integrationId])
+  @@index([integrationId, operationStatus])
+  @@index([providerId, createdAt])
+  @@index([enrollmentId, createdAt])
+  @@index([operationStatus, createdAt])
+}
+
+/// Phase 4E � payer enrollment revalidation (separate from credential expiration).
+enum EnrollmentRevalidationStatus {
+  NOT_STARTED
+  UPCOMING
+  PREPARING
+  READY_FOR_INTERNAL_REVIEW
+  SUBMITTED
+  ACKNOWLEDGED
+  ADDITIONAL_INFORMATION_REQUIRED
+  APPROVED
+  COMPLETED
+  DENIED
+  OVERDUE
+  CANCELLED
+}
+
+enum RevalidationDueDateSource {
+  CONFIRMED
+  ESTIMATED
+  MANUAL
+  PAYER_NOTICE
+  OTHER
+}
+
+model EnrollmentRevalidation {
+  id                   String                        @id @default(cuid())
+  tenantId             String
+  tenant               Tenant                        @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  enrollmentId         String
+  enrollment           EnrollmentApplication         @relation(fields: [enrollmentId], references: [id], onDelete: Cascade)
+  providerId           String?
+  provider             Provider?                     @relation(fields: [providerId], references: [id], onDelete: SetNull)
+  payerId              String?
+  payer                Payer?                        @relation(fields: [payerId], references: [id], onDelete: SetNull)
+  payerPlanId          String?
+  payerPlan            PayerPlan?                    @relation(fields: [payerPlanId], references: [id], onDelete: SetNull)
+  /// MEDICARE_REVALIDATION | MEDICAID_REVALIDATION | COMMERCIAL_REVALIDATION | GROUP_REVALIDATION | FACILITY_REVALIDATION | OTHER
+  revalidationType     String
+  referenceNumber      String?
+  dueDate              DateTime?
+  dueDateSource        RevalidationDueDateSource     @default(MANUAL)
+  notificationDate     DateTime?
+  initiatedAt          DateTime?
+  submittedAt          DateTime?
+  acknowledgedAt       DateTime?
+  completedAt          DateTime?
+  effectiveDate        DateTime?
+  status               EnrollmentRevalidationStatus  @default(NOT_STARTED)
+  assignedToId         String?
+  assignedTo           User?                         @relation("RevalidationAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  source               String?
+  sourceReference      String?
+  notes                String?
+  internalNotes        String?
+  evidenceDocumentId   String?
+  evidenceDocument     Document?                     @relation(fields: [evidenceDocumentId], references: [id], onDelete: SetNull)
+  submissionConfirmed  Boolean                       @default(false)
+  denialReason         String?
+  cancellationReason   String?
+  createdById          String?
+  createdBy            User?                         @relation("RevalidationCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  createdAt            DateTime                      @default(now())
+  updatedAt            DateTime                      @updatedAt
+  events               EnrollmentRevalidationEvent[]
+  @@index([tenantId, enrollmentId])
+  @@index([tenantId, status, dueDate])
+  @@index([providerId, dueDate])
+  @@index([payerId, status])
+  @@index([assignedToId, dueDate])
+  @@index([enrollmentId, revalidationType, status])
+  @@index([evidenceDocumentId])
+}
+
+model EnrollmentRevalidationEvent {
+  id               String                       @id @default(cuid())
+  revalidationId   String
+  revalidation     EnrollmentRevalidation       @relation(fields: [revalidationId], references: [id], onDelete: Cascade)
+  fromStatus       EnrollmentRevalidationStatus?
+  toStatus         EnrollmentRevalidationStatus
+  actorId          String?
+  actor            User?                        @relation("RevalidationEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  reason           String?
+  eventType        String?
+  metadata         Json?
+  createdAt        DateTime                     @default(now())
+  @@index([revalidationId, createdAt])
 }

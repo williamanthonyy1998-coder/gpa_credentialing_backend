@@ -2,6 +2,11 @@ import crypto from 'node:crypto';
 
 const PREFIX = 'enc:v1:';
 
+function allowPlaintextTestFixtures(): boolean {
+  return process.env.NODE_ENV !== 'production'
+    && process.env.FIELD_ENCRYPTION_ALLOW_PLAINTEXT_TEST === '1';
+}
+
 function resolveKey(): Buffer | null {
   const raw = process.env.FIELD_ENCRYPTION_KEY || '';
   if (raw.trim()) {
@@ -14,10 +19,7 @@ function resolveKey(): Buffer | null {
     } catch { /* fall through */ }
     return crypto.createHash('sha256').update(trimmed).digest();
   }
-  const jwt = process.env.JWT_SECRET || '';
-  if (jwt && process.env.NODE_ENV !== 'production') {
-    return crypto.createHash('sha256').update(`field-crypto:${jwt}`).digest();
-  }
+  // H6: never silently derive a production-like key from JWT_SECRET
   return null;
 }
 
@@ -33,8 +35,14 @@ export function encryptField(plaintext: string | null | undefined): string | nul
     if (process.env.NODE_ENV === 'production') {
       throw new Error('FIELD_ENCRYPTION_KEY is required to store sensitive banking fields in production');
     }
-    // Dev fallback: store with marker but not encrypted — still better to always encrypt when possible
-    return plaintext;
+    if (allowPlaintextTestFixtures()) {
+      // Explicit test-only escape hatch — never silent
+      return plaintext;
+    }
+    throw new Error(
+      'FIELD_ENCRYPTION_KEY is required to encrypt sensitive fields. '
+      + 'For isolated test fixtures only, set FIELD_ENCRYPTION_ALLOW_PLAINTEXT_TEST=1 (non-production).'
+    );
   }
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);

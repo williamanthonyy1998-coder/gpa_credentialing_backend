@@ -8,6 +8,7 @@ import { Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
+import { requireTenantContext } from '../services/tenantAccess';
 import { GENERAL_ALLOWED_MIME, validateUploadedFile } from '../services/fileMagic';
 import {
   ENROLLMENT_ACTIVITY_TYPES,
@@ -50,7 +51,7 @@ function enrollmentIdFrom(req: AuthRequest) {
 
 router.get('/:id/activities', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const includeDeleted = String(req.query.includeDeleted || '') === '1'
       && (req.user!.role === Role.ADMIN || req.user!.role === Role.AUDITOR);
     const activities = await prisma.enrollmentActivity.findMany({
@@ -93,7 +94,7 @@ router.post('/:id/activities', async (req: AuthRequest, res: Response, next: Nex
       documentIds: z.array(z.string().min(1)).max(10).optional()
     }).parse(req.body);
 
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
 
     if (input.activityType === 'FOLLOW_UP_COMPLETED' && !input.completedAt && !input.metadata?.completedAt) {
       input.completedAt = new Date();
@@ -187,7 +188,7 @@ router.post('/:id/activities', async (req: AuthRequest, res: Response, next: Nex
 
 router.patch('/:id/activities/:activityId', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const activity = await prisma.enrollmentActivity.findFirst({
       where: { id: req.params.activityId, enrollmentId: enrollment.id, deletedAt: null }
     });
@@ -236,7 +237,7 @@ router.patch('/:id/activities/:activityId', async (req: AuthRequest, res: Respon
 
 router.delete('/:id/activities/:activityId', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const activity = await prisma.enrollmentActivity.findFirst({
       where: { id: req.params.activityId, enrollmentId: enrollment.id, deletedAt: null }
     });
@@ -277,7 +278,7 @@ router.delete('/:id/activities/:activityId', async (req: AuthRequest, res: Respo
 
 router.post('/:id/activities/read', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const result = await markEnrollmentActivitiesRead(enrollment.id, req.user!.id);
     res.json(result);
   } catch (e: any) {
@@ -288,7 +289,7 @@ router.post('/:id/activities/read', async (req: AuthRequest, res: Response, next
 
 router.get('/:id/approval', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const documents = await prisma.document.findMany({
       where: {
         enrollmentId: enrollment.id,
@@ -351,7 +352,7 @@ router.put('/:id/approval', async (req: AuthRequest, res: Response, next: NextFu
       notes: z.string().max(8000).optional().nullable()
     }).parse(req.body);
 
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const before = enrollment.approvalDetails;
 
     const result = await prisma.$transaction(async (tx) => {
@@ -440,7 +441,7 @@ router.post('/:id/approval/documents', upload.single('file'), async (req: AuthRe
     }
     if (!req.file) return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
 
-    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role);
+    const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
     const title = String(req.body?.title || req.file.originalname || 'Approval document').slice(0, 200);
     const docType = String(req.body?.type || 'APPROVAL_LETTER').slice(0, 80);
 
@@ -456,8 +457,10 @@ router.post('/:id/approval/documents', upload.single('file'), async (req: AuthRe
     }
 
     const result = await prisma.$transaction(async (tx) => {
+      requireTenantContext(req.tenantContext);
       const document = await tx.document.create({
         data: {
+          tenantId: req.tenantContext!.tenantId,
           title,
           type: docType,
           category: 'enrollment_approval',
@@ -471,7 +474,9 @@ router.post('/:id/approval/documents', upload.single('file'), async (req: AuthRe
           originalName: req.file!.originalname,
           mimeType: req.file!.mimetype,
           sizeBytes: req.file!.size,
-          uploadedAt: new Date()
+          uploadedAt: new Date(),
+          // H1/H2: enrollment approval uploads start quarantined
+          securityStatus: 'QUARANTINED'
         }
       });
       await tx.enrollmentActivity.create({

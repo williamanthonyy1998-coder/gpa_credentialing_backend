@@ -2,22 +2,49 @@ import { Router, Response, NextFunction } from 'express';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../middleware/auth';
 import { getAuthorizedOrganizationIds } from '../services/orgAccess';
+import {
+  andWhere,
+  listWhereForResource,
+  providerInTenantWhere,
+  requireTenantContext
+} from '../services/tenantAccess';
+import { isPlatformAdmin } from '../services/tenants';
 
 const router = Router();
 
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     const q = String(req.query.q || '').trim();
     if (q.length < 2) return res.json({ q, results: [] });
     const take = Math.min(10, Math.max(1, Number(req.query.limit) || 5));
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
-    const orgFilter = orgIds ? { organizationId: { in: orgIds } } : {};
+    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const orgInTenant = orgIds.length ? { id: { in: orgIds } } : { tenantId };
+    const practiceScope = andWhere(listWhereForResource('practices', tenantId)!, orgIds.length ? { organizationId: { in: orgIds } } : {});
+    const facilityScope = andWhere(listWhereForResource('facilities', tenantId)!, orgIds.length ? {
+      OR: [
+        { organizationId: { in: orgIds } },
+        { practice: { is: { organizationId: { in: orgIds } } } }
+      ]
+    } : {});
+    const enrollmentScope = andWhere(listWhereForResource('enrollments', tenantId)!, orgIds.length ? {
+      OR: [
+        { organizationId: { in: orgIds } },
+        { practice: { is: { organizationId: { in: orgIds } } } }
+      ]
+    } : {});
+    const caseScope = listWhereForResource('cases', tenantId)!;
+    const taskScope = andWhere(listWhereForResource('tasks', tenantId)!, orgIds.length ? { organizationId: { in: orgIds } } : {});
+    const providerScope = providerInTenantWhere(tenantId);
+
+    const includeEmployees = isPlatformAdmin(req.user!.role) && req.tenantContext!.platformAccess;
 
     const [organizations, practices, facilities, providers, payers, enrollments, cases, employees, tasks] = await Promise.all([
       prisma.organization.findMany({
         where: {
           AND: [
-            orgIds ? { id: { in: orgIds } } : {},
+            orgInTenant,
             { OR: [{ legalName: { contains: q, mode: 'insensitive' } }, { dba: { contains: q, mode: 'insensitive' } }] }
           ]
         },
@@ -27,7 +54,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
       prisma.practice.findMany({
         where: {
           AND: [
-            orgFilter,
+            practiceScope,
             { OR: [{ name: { contains: q, mode: 'insensitive' } }, { npi: { contains: q } }] }
           ]
         },
@@ -37,7 +64,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
       prisma.facility.findMany({
         where: {
           AND: [
-            orgIds ? { OR: [{ organizationId: { in: orgIds } }, { practice: { is: { organizationId: { in: orgIds } } } }] } : {},
+            facilityScope,
             { OR: [{ name: { contains: q, mode: 'insensitive' } }, { npi: { contains: q } }] }
           ]
         },
@@ -46,10 +73,15 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
       }),
       prisma.provider.findMany({
         where: {
-          OR: [
-            { firstName: { contains: q, mode: 'insensitive' } },
-            { lastName: { contains: q, mode: 'insensitive' } },
-            { npi: { contains: q } }
+          AND: [
+            providerScope,
+            {
+              OR: [
+                { firstName: { contains: q, mode: 'insensitive' } },
+                { lastName: { contains: q, mode: 'insensitive' } },
+                { npi: { contains: q } }
+              ]
+            }
           ]
         },
         select: { id: true, firstName: true, lastName: true, npi: true, status: true },
@@ -63,7 +95,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
       prisma.enrollmentApplication.findMany({
         where: {
           AND: [
-            orgIds ? { OR: [{ organizationId: { in: orgIds } }, { practice: { is: { organizationId: { in: orgIds } } } }] } : {},
+            enrollmentScope,
             { OR: [{ applicationNo: { contains: q, mode: 'insensitive' } }, { referenceNo: { contains: q, mode: 'insensitive' } }] }
           ]
         },
@@ -71,25 +103,32 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         take
       }),
       prisma.credentialingCase.findMany({
-        where: { caseNumber: { contains: q, mode: 'insensitive' } },
+        where: {
+          AND: [
+            caseScope,
+            { caseNumber: { contains: q, mode: 'insensitive' } }
+          ]
+        },
         select: { id: true, caseNumber: true, status: true },
         take
       }),
-      prisma.user.findMany({
-        where: {
-          OR: [
-            { name: { contains: q, mode: 'insensitive' } },
-            { email: { contains: q, mode: 'insensitive' } },
-            { employeeCode: { contains: q, mode: 'insensitive' } }
-          ]
-        },
-        select: { id: true, name: true, email: true, role: true },
-        take
-      }),
+      includeEmployees
+        ? prisma.user.findMany({
+          where: {
+            OR: [
+              { name: { contains: q, mode: 'insensitive' } },
+              { email: { contains: q, mode: 'insensitive' } },
+              { employeeCode: { contains: q, mode: 'insensitive' } }
+            ]
+          },
+          select: { id: true, name: true, email: true, role: true },
+          take
+        })
+        : Promise.resolve([]),
       prisma.task.findMany({
         where: {
           AND: [
-            orgIds ? { organizationId: { in: orgIds } } : {},
+            taskScope,
             { title: { contains: q, mode: 'insensitive' } }
           ]
         },

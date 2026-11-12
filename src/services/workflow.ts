@@ -5,12 +5,16 @@ export const ENROLLMENT_TRANSITIONS: Record<EnrollmentStatus, EnrollmentStatus[]
   NOT_STARTED: ['PREPARING', 'WITHDRAWN'],
   PREPARING: ['READY_TO_SUBMIT', 'NOT_STARTED', 'WITHDRAWN'],
   READY_TO_SUBMIT: ['SUBMITTED', 'PREPARING', 'WITHDRAWN'],
-  SUBMITTED: ['PAYER_REVIEW', 'ADDITIONAL_INFORMATION_NEEDED', 'WITHDRAWN'],
+  SUBMITTED: ['ACKNOWLEDGED', 'PAYER_REVIEW', 'ADDITIONAL_INFORMATION_NEEDED', 'WITHDRAWN'],
+  ACKNOWLEDGED: ['PAYER_REVIEW', 'ADDITIONAL_INFORMATION_NEEDED', 'APPROVED', 'DENIED', 'WITHDRAWN'],
   PAYER_REVIEW: ['ADDITIONAL_INFORMATION_NEEDED', 'APPROVED', 'DENIED', 'WITHDRAWN'],
   ADDITIONAL_INFORMATION_NEEDED: ['PREPARING', 'READY_TO_SUBMIT', 'SUBMITTED', 'WITHDRAWN'],
-  APPROVED: [],
-  DENIED: [],
-  WITHDRAWN: []
+  APPROVED: ['EFFECTIVE', 'TERMINATED', 'CLOSED'],
+  EFFECTIVE: ['TERMINATED', 'CLOSED'],
+  DENIED: ['CLOSED'],
+  WITHDRAWN: ['CLOSED'],
+  TERMINATED: ['CLOSED'],
+  CLOSED: []
 };
 
 export const CASE_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
@@ -24,20 +28,25 @@ export const CASE_TRANSITIONS: Record<CaseStatus, CaseStatus[]> = {
   ON_HOLD: ['DRAFT', 'INFORMATION_NEEDED', 'UNDER_REVIEW']
 };
 
-const FINAL_ENROLLMENT: EnrollmentStatus[] = ['APPROVED', 'DENIED'];
+const FINAL_ENROLLMENT: EnrollmentStatus[] = [
+  EnrollmentStatus.APPROVED,
+  EnrollmentStatus.DENIED,
+  EnrollmentStatus.EFFECTIVE,
+  EnrollmentStatus.TERMINATED
+];
 const FINAL_CASE: CaseStatus[] = ['APPROVED', 'REJECTED'];
 const APPROVER_ROLES: Role[] = [Role.ADMIN, Role.CREDENTIALING_MANAGER, Role.APPROVER];
 
 export function allowedEnrollmentTransitions(from: EnrollmentStatus, role: Role): EnrollmentStatus[] {
   const next = ENROLLMENT_TRANSITIONS[from] || [];
   if (APPROVER_ROLES.includes(role)) return next;
-  return next.filter(s => !FINAL_ENROLLMENT.includes(s));
+  return next.filter((s) => !FINAL_ENROLLMENT.includes(s));
 }
 
 export function allowedCaseTransitions(from: CaseStatus, role: Role): CaseStatus[] {
   const next = CASE_TRANSITIONS[from] || [];
   if (APPROVER_ROLES.includes(role)) return next;
-  return next.filter(s => !FINAL_CASE.includes(s));
+  return next.filter((s) => !FINAL_CASE.includes(s));
 }
 
 export function assertEnrollmentTransition(from: EnrollmentStatus, to: EnrollmentStatus, role: Role) {

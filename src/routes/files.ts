@@ -25,7 +25,7 @@ import {
   OTHER_DOCUMENTS_ALLOWED_MIME,
   validateUploadedFile
 } from '../services/fileMagic';
-import { assertOrganizationAccess, resolveRecordOrganizationId } from '../services/orgAccess';
+import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
 
 const router = Router();
 const uploadDir = path.resolve(process.cwd(), 'private-uploads');
@@ -58,8 +58,8 @@ function resolveStoredPath(storageKey: string) {
 }
 
 async function assertDocAccess(req: AuthRequest, documentId: string) {
-  const orgId = await resolveRecordOrganizationId('documents', documentId);
-  await assertOrganizationAccess(req.user!.id, req.user!.role, orgId);
+  requireTenantContext(req.tenantContext);
+  await assertRecordInTenant(req.tenantContext!, 'documents', documentId);
 }
 
 router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, next) => {
@@ -111,6 +111,24 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
     }
 
     const previousKey = document.storageKey;
+    // Phase 2C: archive prior file metadata; keep physical file for audit (do not unlink).
+    if (previousKey && replace) {
+      const { archiveCurrentFileRevision } = await import('../services/documentSecurity');
+      await archiveCurrentFileRevision({
+        documentId: document.id,
+        storageKey: document.storageKey,
+        originalName: document.originalName,
+        mimeType: document.mimeType,
+        sizeBytes: document.sizeBytes,
+        securityStatus: (document as any).securityStatus || 'AVAILABLE',
+        createdById: req.user!.id,
+        reason: 'REPLACE'
+      });
+    }
+
+    // H1/H2: every new upload starts quarantined — never auto-AVAILABLE
+    const { scanOrQuarantine } = await import('../services/documentSecurity');
+    const scan = await scanOrQuarantine({ documentId: document.id, filePath: req.file.path });
     const updated = await prisma.document.update({
       where: { id: document.id },
       data: {
@@ -119,22 +137,24 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
         mimeType: req.file.mimetype,
         sizeBytes: req.file.size,
         status: 'RECEIVED',
-        uploadedAt: new Date()
+        uploadedAt: new Date(),
+        securityStatus: scan.status
       }
     });
-
-    if (previousKey && previousKey !== updated.storageKey) {
-      const oldPath = resolveStoredPath(previousKey);
-      if (oldPath) safeUnlink(oldPath);
-    }
 
     await audit(
       req,
       previousKey ? 'REPLACE_FILE' : 'UPLOAD_FILE',
       'documents',
       updated.id,
-      { hadFile: Boolean(previousKey), originalName: document.originalName, sizeBytes: document.sizeBytes },
-      { originalName: updated.originalName, sizeBytes: updated.sizeBytes, mimeType: updated.mimeType }
+      { hadFile: Boolean(previousKey), originalName: document.originalName, sizeBytes: document.sizeBytes, priorKeyKept: Boolean(previousKey) },
+      {
+        originalName: updated.originalName,
+        sizeBytes: updated.sizeBytes,
+        mimeType: updated.mimeType,
+        securityStatus: updated.securityStatus,
+        scanReason: !scan.scanned ? scan.reason : undefined
+      }
     );
 
     res.json({
@@ -143,6 +163,7 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
       sizeBytes: updated.sizeBytes,
       mimeType: updated.mimeType,
       status: updated.status,
+      securityStatus: updated.securityStatus,
       attention: computeCredentialAttention(updated)
     });
   } catch (e) {
@@ -156,6 +177,19 @@ router.get('/:id/file', async (req: AuthRequest, res, next) => {
     const document = await prisma.document.findUnique({ where: { id: req.params.id } });
     if (!document?.storageKey) return res.status(404).json({ error: 'No file is attached to this document record' });
     await assertDocAccess(req, document.id);
+    if ((document as any).securityStatus === 'DELETED' || (document as any).securityStatus === 'REJECTED') {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    const { canNormalDownload } = await import('../services/documentSecurity');
+    const security = (document as any).securityStatus || 'QUARANTINED';
+    // H4: quarantined files cannot be downloaded on the normal path (no role bypass / warning header)
+    if (!canNormalDownload(security)) {
+      return res.status(403).json({
+        error: 'Document is not available for download. Quarantined files require an authorized investigative download with a recorded reason.',
+        code: 'DOCUMENT_NOT_AVAILABLE',
+        securityStatus: security
+      });
+    }
     const fullPath = resolveStoredPath(document.storageKey);
     if (!fullPath) return res.status(404).json({ error: 'Stored file was not found' });
 
@@ -174,6 +208,55 @@ router.get('/:id/file', async (req: AuthRequest, res, next) => {
       res.setHeader('Content-Disposition', `inline; filename="${path.basename(document.originalName || document.title)}"`);
       return fs.createReadStream(fullPath).pipe(res);
     }
+    res.download(fullPath, path.basename(document.originalName || document.title));
+  } catch (e) { next(e); }
+});
+
+/** H4: Exceptional investigative download — narrow role + reason + audit. */
+router.post('/:id/investigative-download', async (req: AuthRequest, res, next) => {
+  try {
+    const { canInvestigativeDownload } = await import('../services/documentSecurity');
+    if (!canInvestigativeDownload(req.user!.role)) {
+      return res.status(403).json({ error: 'Insufficient permissions for investigative download' });
+    }
+    const reason = String(req.body?.reason || '').trim();
+    if (reason.length < 12) {
+      return res.status(400).json({
+        error: 'Investigative download requires a reason (minimum 12 characters)',
+        code: 'INVESTIGATIVE_REASON_REQUIRED'
+      });
+    }
+    const document = await prisma.document.findUnique({ where: { id: req.params.id } });
+    if (!document?.storageKey) return res.status(404).json({ error: 'No file is attached to this document record' });
+    await assertDocAccess(req, document.id);
+    if ((document as any).securityStatus === 'DELETED') {
+      return res.status(404).json({ error: 'Document not found' });
+    }
+    if ((document as any).securityStatus === 'REJECTED') {
+      return res.status(403).json({ error: 'Rejected documents cannot be downloaded', code: 'REJECTED_NOT_DOWNLOADABLE' });
+    }
+    const security = (document as any).securityStatus || 'QUARANTINED';
+    if (security === 'AVAILABLE') {
+      return res.status(400).json({
+        error: 'Document is AVAILABLE — use the normal download endpoint',
+        code: 'USE_NORMAL_DOWNLOAD'
+      });
+    }
+    const fullPath = resolveStoredPath(document.storageKey);
+    if (!fullPath) return res.status(404).json({ error: 'Stored file was not found' });
+
+    await audit(req, 'INVESTIGATIVE_DOWNLOAD', 'documents', document.id, undefined, {
+      originalName: document.originalName,
+      title: document.title,
+      securityStatus: security,
+      reason,
+      malwareScanned: false
+    });
+
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.setHeader('X-Document-Security-Warning', 'INVESTIGATIVE_QUARANTINE_ACCESS');
+    if (document.mimeType) res.type(document.mimeType);
     res.download(fullPath, path.basename(document.originalName || document.title));
   } catch (e) { next(e); }
 });

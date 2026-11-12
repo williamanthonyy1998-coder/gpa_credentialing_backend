@@ -2,6 +2,12 @@ import { Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { notifyUser, notifyUsers } from './notifications';
 import { getAuthorizedOrganizationIds } from './orgAccess';
+import {
+  TenantAuthContext,
+  assertRecordInTenant,
+  denyNotFound,
+  requireTenantContext
+} from './tenantAccess';
 
 export const ENROLLMENT_ACTIVITY_TYPES = [
   'MESSAGE',
@@ -54,7 +60,14 @@ export const activityInclude = {
   }
 } as const;
 
-export async function loadEnrollmentForAccess(enrollmentId: string, userId: string, role: Role) {
+export async function loadEnrollmentForAccess(
+  enrollmentId: string,
+  userId: string,
+  role: Role,
+  tenantCtx?: TenantAuthContext | null
+) {
+  requireTenantContext(tenantCtx);
+  await assertRecordInTenant(tenantCtx!, 'enrollments', enrollmentId);
   const row = await prisma.enrollmentApplication.findUnique({
     where: { id: enrollmentId },
     include: {
@@ -68,24 +81,14 @@ export async function loadEnrollmentForAccess(enrollmentId: string, userId: stri
       }
     }
   });
-  if (!row) {
-    const err: any = new Error('Enrollment not found');
-    err.status = 404;
-    throw err;
-  }
-  const orgIds = await getAuthorizedOrganizationIds(userId, role);
-  if (orgIds) {
-    const orgId = row.organizationId
-      || row.practice?.organizationId
-      || row.facility?.organizationId
-      || row.facility?.practice?.organizationId
-      || null;
-    if (orgId && !orgIds.includes(orgId)) {
-      const err: any = new Error('You do not have access to this enrollment');
-      err.status = 403;
-      throw err;
-    }
-  }
+  if (!row) denyNotFound();
+  const orgIds = await getAuthorizedOrganizationIds(userId, role, tenantCtx);
+  const orgId = row.organizationId
+    || row.practice?.organizationId
+    || row.facility?.organizationId
+    || row.facility?.practice?.organizationId
+    || null;
+  if (orgId && orgIds.length && !orgIds.includes(orgId)) denyNotFound();
   return row;
 }
 

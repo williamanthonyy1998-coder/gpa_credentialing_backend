@@ -4,8 +4,20 @@ import { EnrollmentStatus, Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest, allowRoles } from '../middleware/auth';
-import { assertEnrollmentTransition, allowedEnrollmentTransitions, daysConsumed } from '../services/workflow';
+import { allowedEnrollmentTransitions, daysConsumed } from '../services/workflow';
+import {
+  assertNoDuplicateActiveEnrollment,
+  computeEnrollmentAttention,
+  validateEnrollmentRelationships
+} from '../services/enrollmentLifecycle';
 import { getAuthorizedOrganizationIds } from '../services/orgAccess';
+import {
+  andWhere,
+  assertRecordInTenant,
+  assertRelatedRecordsSameTenant,
+  listWhereForResource,
+  requireTenantContext
+} from '../services/tenantAccess';
 import { notifyUser } from '../services/notifications';
 import {
   AssigneeUser,
@@ -17,6 +29,7 @@ import {
   loadAssigneeMap,
   resolveEnrollmentLinks
 } from '../services/enrollments';
+import { assertPayerPlanAssignable } from '../services/directoryIntegration';
 import {
   ensureOverdueFollowUpNotifications,
   notifyEnrollmentStakeholders,
@@ -57,15 +70,21 @@ function enrich(row: any, role: Role, usersByEmail?: Map<string, AssigneeUser>, 
     highlighted: Boolean(row.highlighted),
     assigneeName: enrollmentAssigneeDisplayName(row.assignedTo, usersByEmail),
     assignedToUser,
+    attention: computeEnrollmentAttention(row),
     allowedTransitions: allowedEnrollmentTransitions(row.status, role),
     unreadActivityCount: extras?.unreadActivityCount ?? row.unreadActivityCount ?? 0,
-    hasApprovalDetails: Boolean(row.approvalDetails?.id || row.referenceNo || row.effectiveAt)
+    hasApprovalDetails: Boolean(row.approvalDetails?.id || row.referenceNo || row.effectiveAt),
+    // GPA-only internal notes
+    ...(role === Role.CLIENT_USER || role === Role.EXTERNAL_PROVIDER
+      ? { internalNotes: undefined, notes: row.notes }
+      : {})
   };
 }
 
-function buildWhere(query: any, userEmail: string, orgIds: string[] | null) {
+function buildWhere(query: any, userEmail: string, tenantId: string, orgIds: string[]) {
   const where: any = {};
-  const and: any[] = [];
+  const tenantScope = listWhereForResource('enrollments', tenantId);
+  const and: any[] = tenantScope ? [tenantScope] : [];
   const q = String(query.q || '').trim();
   if (q) {
     and.push({
@@ -107,7 +126,7 @@ function buildWhere(query: any, userEmail: string, orgIds: string[] | null) {
     if (query.followUpTo) nextFollowUpAt.lte = new Date(String(query.followUpTo));
     and.push({ nextFollowUpAt });
   }
-  if (orgIds) {
+  if (orgIds.length) {
     and.push({
       OR: [
         { organizationId: { in: orgIds } },
@@ -124,9 +143,11 @@ router.use(enrollmentActivityRoutes);
 
 router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     await ensureOverdueFollowUpNotifications(req.user!.email, req.user!.id).catch(() => {});
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
-    const base = buildWhere(req.query, req.user!.email, orgIds);
+    const tenantId = req.tenantContext!.tenantId;
+    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const base = buildWhere(req.query, req.user!.email, tenantId, orgIds);
     const statuses = Object.values(EnrollmentStatus);
     const counts = await Promise.all(statuses.map(async status => ({
       status,
@@ -153,8 +174,10 @@ router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunctio
 
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
-    const where = buildWhere(req.query, req.user!.email, orgIds);
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
+    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const where = buildWhere(req.query, req.user!.email, tenantId, orgIds);
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || Number(req.query.limit) || 25));
     const [total, rows] = await Promise.all([
@@ -180,6 +203,8 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
 
 router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     if (([Role.READ_ONLY, Role.AUDITOR] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot create enrollments' });
     }
@@ -193,14 +218,11 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       facilityId: z.string().min(1, 'Facility is required'),
       practiceId: z.string().optional().nullable(),
       payerPlanId: z.string().min(1, 'Payer plan is required'),
-      status: z.nativeEnum(EnrollmentStatus).optional(),
+      enrollmentType: z.enum(['INDIVIDUAL', 'GROUP', 'FACILITY', 'REASSIGNMENT', 'OTHER']).optional(),
+      billingEntityId: z.string().optional().nullable(),
       assignedTo: z.string().optional().nullable(),
       dueAt: z.coerce.date().optional().nullable(),
-      submittedAt: z.coerce.date().optional().nullable(),
-      referenceNo: z.string().optional().nullable(),
-      lastFollowUpAt: z.coerce.date().optional().nullable(),
       nextFollowUpAt: z.coerce.date().optional().nullable(),
-      effectiveAt: z.coerce.date().optional().nullable(),
       notes: z.string().optional().nullable(),
       checklist: z.any().optional(),
       highlighted: z.boolean().optional()
@@ -212,6 +234,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       return res.status(400).json({ error: 'Payer and payer plan are required' });
     }
 
+    await assertPayerPlanAssignable(parsed.payerPlanId, { requireActive: true });
+
     const links = await resolveEnrollmentLinks({
       facilityId: parsed.facilityId,
       practiceId: parsed.practiceId,
@@ -221,25 +245,50 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
       payerId: parsed.payerId
     });
 
+    await assertRelatedRecordsSameTenant(tenantId, {
+      organizationId: links.organizationId,
+      practiceId: links.practiceId,
+      facilityId: links.facilityId,
+      providerId: links.providerId
+    });
+
+    await validateEnrollmentRelationships({
+      tenantId,
+      providerId: links.providerId,
+      organizationId: links.organizationId,
+      practiceId: links.practiceId,
+      facilityId: links.facilityId,
+      billingEntityId: parsed.billingEntityId,
+      payerPlanId: links.payerPlanId,
+      payerId: parsed.payerId
+    });
+
+    await assertNoDuplicateActiveEnrollment({
+      tenantId,
+      providerId: links.providerId,
+      payerPlanId: links.payerPlanId,
+      facilityId: links.facilityId
+    });
+
     const row = await prisma.$transaction(async (tx) => {
       const applicationNo = await generateApplicationNo(tx);
       const created = await tx.enrollmentApplication.create({
         data: {
+          tenantId,
           applicationNo,
           subject: parsed.subject || null,
           providerId: links.providerId,
           organizationId: links.organizationId,
           facilityId: links.facilityId,
           practiceId: links.practiceId,
+          billingEntityId: parsed.billingEntityId || null,
+          enrollmentType: parsed.enrollmentType || 'INDIVIDUAL',
           payerPlanId: links.payerPlanId,
-          status: parsed.status || EnrollmentStatus.NOT_STARTED,
+          // Always start as draft — lifecycle endpoints record submission/approval/effective.
+          status: EnrollmentStatus.NOT_STARTED,
           assignedTo: parsed.assignedTo || null,
           dueAt: parsed.dueAt || null,
-          submittedAt: parsed.submittedAt || null,
-          referenceNo: parsed.referenceNo || null,
-          lastFollowUpAt: parsed.lastFollowUpAt || null,
           nextFollowUpAt: parsed.nextFollowUpAt || null,
-          effectiveAt: parsed.effectiveAt || null,
           notes: parsed.notes || null,
           checklist: parsed.checklist || undefined,
           highlighted: Boolean(parsed.highlighted)
@@ -251,6 +300,8 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
           enrollmentId: created.id,
           toStatus: created.status,
           changedBy: req.user!.id,
+          actorRole: req.user!.role,
+          eventType: 'ENROLLMENT_CREATED',
           reason: 'Enrollment created'
         }
       });
@@ -282,13 +333,13 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
 
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
     const row = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id }, include: enrollmentInclude });
     if (!row) return res.status(404).json({ error: 'Enrollment not found' });
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role);
-    if (orgIds) {
-      const orgId = row.organizationId || (row as any).practice?.organizationId;
-      if (orgId && !orgIds.includes(orgId)) return res.status(403).json({ error: 'You do not have access to this enrollment' });
-    }
+    const orgId = row.organizationId || (row as any).practice?.organizationId;
+    if (orgId && orgIds.length && !orgIds.includes(orgId)) return res.status(404).json({ error: 'Enrollment not found' });
     const usersByEmail = await loadAssigneeMap([row.assignedTo]);
     const unreadActivityCount = await unreadActivityCountForUser(row.id, req.user!.id);
     res.json(enrich(row, req.user!.role, usersByEmail, { unreadActivityCount }));
@@ -297,24 +348,26 @@ router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) =
 
 router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
+    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
     if (([Role.READ_ONLY, Role.AUDITOR] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot modify enrollments' });
     }
+    const isClient = req.user!.role === Role.CLIENT_USER;
     const schema = z.object({
       subject: z.string().optional().nullable(),
-      status: z.nativeEnum(EnrollmentStatus).optional(),
       assignedTo: z.string().optional().nullable(),
       dueAt: z.coerce.date().optional().nullable(),
-      submittedAt: z.coerce.date().optional().nullable(),
       referenceNo: z.string().optional().nullable(),
       lastFollowUpAt: z.coerce.date().optional().nullable(),
       nextFollowUpAt: z.coerce.date().optional().nullable(),
-      effectiveAt: z.coerce.date().optional().nullable(),
       revalidationAt: z.coerce.date().optional().nullable(),
-      decisionAt: z.coerce.date().optional().nullable(),
-      decisionReason: z.string().optional().nullable(),
       notes: z.string().optional().nullable(),
+      internalNotes: z.string().optional().nullable(),
       checklist: z.any().optional(),
+      enrollmentType: z.enum(['INDIVIDUAL', 'GROUP', 'FACILITY', 'REASSIGNMENT', 'OTHER']).optional(),
+      billingEntityId: z.string().optional().nullable(),
       // Highlight/alert flag — must never alter status by itself
       highlighted: z.boolean().optional(),
       // Relationship updates are allowed but must keep facility when clearing provider
@@ -326,11 +379,38 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
     });
     const data: any = schema.parse(req.body);
     for (const k of Object.keys(data)) if (data[k] === '') data[k] = null;
+    // GPA-only field — never accept from client/external roles (SEC-04)
+    if (isClient || req.user!.role === Role.EXTERNAL_PROVIDER) {
+      const restrictedAttempted: string[] = [];
+      if (Object.prototype.hasOwnProperty.call(req.body || {}, 'internalNotes')) {
+        restrictedAttempted.push('internalNotes');
+      }
+      delete data.internalNotes;
+      if (restrictedAttempted.length) {
+        await audit(req, 'restricted_field_write_attempt', 'enrollments', req.params.id, undefined, {
+          fields: restrictedAttempted,
+          role: req.user!.role
+        });
+      }
+    }
+
+    // Lifecycle status changes must use dedicated endpoints (Phase 4A).
+    if (Object.prototype.hasOwnProperty.call(req.body || {}, 'status')
+      || Object.prototype.hasOwnProperty.call(req.body || {}, 'submittedAt')
+      || Object.prototype.hasOwnProperty.call(req.body || {}, 'effectiveAt')
+      || Object.prototype.hasOwnProperty.call(req.body || {}, 'decisionAt')) {
+      return res.status(400).json({
+        error: 'Use /api/enrollments/:id/prepare|ready|submit|acknowledge|approve|effective|reject|terminate for lifecycle changes',
+        code: 'LIFECYCLE_ENDPOINT_REQUIRED'
+      });
+    }
 
     const before = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Enrollment not found' });
-    if (data.status && data.status !== before.status) {
-      assertEnrollmentTransition(before.status, data.status, req.user!.role);
+    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const beforeOrgId = before.organizationId;
+    if (beforeOrgId && orgIds.length && !orgIds.includes(beforeOrgId)) {
+      return res.status(404).json({ error: 'Enrollment not found' });
     }
 
     const relationshipTouched = ['providerId', 'facilityId', 'practiceId', 'payerPlanId', 'payerId']
@@ -341,12 +421,16 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       if (!facilityId) {
         return res.status(400).json({ error: 'Facility is required' });
       }
+      const nextPlanId = data.payerPlanId || before.payerPlanId;
+      if (data.payerPlanId && data.payerPlanId !== before.payerPlanId) {
+        await assertPayerPlanAssignable(String(data.payerPlanId), { requireActive: true });
+      }
       const links = await resolveEnrollmentLinks({
         facilityId,
         practiceId: data.practiceId !== undefined ? data.practiceId : before.practiceId,
         organizationId: before.organizationId,
         providerId: data.providerId !== undefined ? data.providerId : before.providerId,
-        payerPlanId: data.payerPlanId || before.payerPlanId,
+        payerPlanId: nextPlanId,
         payerId: data.payerId
       });
       data.facilityId = links.facilityId;
@@ -355,6 +439,12 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       data.providerId = links.providerId;
       data.payerPlanId = links.payerPlanId;
       delete data.payerId;
+      await assertRelatedRecordsSameTenant(tenantId, {
+        organizationId: links.organizationId,
+        practiceId: links.practiceId,
+        facilityId: links.facilityId,
+        providerId: links.providerId
+      });
     }
 
     // Never allow client to change applicationNo; highlighting must not mutate status
@@ -363,9 +453,20 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       // status intentionally untouched when only toggling highlight
     }
 
-    const statusChanging = Boolean(data.status && data.status !== before.status);
     const assigneeChanging = Object.prototype.hasOwnProperty.call(data, 'assignedTo')
       && data.assignedTo !== before.assignedTo;
+
+    if (data.billingEntityId) {
+      await validateEnrollmentRelationships({
+        tenantId,
+        providerId: before.providerId,
+        organizationId: before.organizationId,
+        practiceId: before.practiceId,
+        facilityId: before.facilityId,
+        billingEntityId: data.billingEntityId,
+        payerPlanId: before.payerPlanId
+      });
+    }
 
     const row = await prisma.$transaction(async (tx) => {
       const updated = await tx.enrollmentApplication.update({
@@ -373,31 +474,6 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
         data,
         include: enrollmentInclude
       });
-      if (statusChanging) {
-        await tx.statusHistory.create({
-          data: {
-            enrollmentId: updated.id,
-            fromStatus: before.status,
-            toStatus: data.status,
-            changedBy: req.user!.id,
-            reason: data.decisionReason || 'Status updated'
-          }
-        });
-        await tx.enrollmentActivity.create({
-          data: {
-            enrollmentId: updated.id,
-            authorId: req.user!.id,
-            body: `Status changed from ${before.status} to ${data.status}`,
-            activityType: 'STATUS_CHANGE',
-            metadata: {
-              fromStatus: before.status,
-              toStatus: data.status,
-              changedBy: req.user!.id,
-              changedByName: req.user!.email
-            }
-          }
-        });
-      }
       if (assigneeChanging) {
         await tx.enrollmentActivity.create({
           data: {
@@ -417,17 +493,6 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
       return updated;
     });
 
-    if (statusChanging) {
-      await notifyEnrollmentStakeholders(
-        row,
-        req.user!.id,
-        {
-          title: 'Enrollment status updated',
-          body: `${row.applicationNo}: ${before.status} → ${data.status}`,
-          type: 'enrollment_status'
-        }
-      );
-    }
     if (assigneeChanging && data.assignedTo) {
       const assignee = await prisma.user.findFirst({ where: { email: { equals: data.assignedTo, mode: 'insensitive' } } });
       if (assignee && assignee.id !== req.user!.id) {
@@ -458,12 +523,18 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
 
 router.post('/bulk-assign', allowRoles(Role.ADMIN, Role.CREDENTIALING_MANAGER, Role.ENROLLMENT_SPECIALIST), async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
+    const tenantScope = listWhereForResource('enrollments', tenantId);
     const input = z.object({
       ids: z.array(z.string().min(1)).min(1).max(100),
       assignedTo: z.string().min(1)
     }).parse(req.body);
+    for (const id of input.ids) {
+      await assertRecordInTenant(req.tenantContext!, 'enrollments', id);
+    }
     const result = await prisma.enrollmentApplication.updateMany({
-      where: { id: { in: input.ids } },
+      where: andWhere({ id: { in: input.ids } }, tenantScope)!,
       data: { assignedTo: input.assignedTo }
     });
     const assignee = await prisma.user.findFirst({ where: { email: { equals: input.assignedTo, mode: 'insensitive' } } });

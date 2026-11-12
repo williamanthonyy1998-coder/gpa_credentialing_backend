@@ -6,6 +6,11 @@ import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
 import { assertOwnershipWithinLimit, ownershipSummary } from '../services/ownership';
 import { assertResourceRecordAccess } from '../services/orgAccess';
+import {
+  assertProviderInTenant,
+  assertRecordInTenant,
+  requireTenantContext
+} from '../services/tenantAccess';
 
 const facilityProviderSelect = {
   id: true,
@@ -114,6 +119,8 @@ const scheduleSchema = z.object({
 
 router.get('/practices/:id/detail', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'practices', req.params.id, req.tenantContext);
     const practice = await prisma.practice.findUnique({
       where: { id: req.params.id },
       include: {
@@ -131,6 +138,8 @@ router.get('/practices/:id/detail', async (req: AuthRequest, res: Response, next
 
 router.get('/practices/:id/owners', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'practices', req.params.id, req.tenantContext);
     const summary = await ownershipSummary(req.params.id);
     res.json({
       totalPercent: summary.totalPercent,
@@ -142,8 +151,10 @@ router.get('/practices/:id/owners', async (req: AuthRequest, res: Response, next
 
 router.post('/practice-owners', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = clean(ownerSchema.parse(req.body));
+    await assertRecordInTenant(req.tenantContext!, 'practices', data.practiceId);
     if (data.ssn && !canSeeSensitive(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify sensitive identifiers' });
     await assertOwnershipWithinLimit(data.practiceId, data.ownershipPercent);
     const row = await prisma.practiceOwner.create({ data });
@@ -157,10 +168,12 @@ router.post('/practice-owners', async (req: AuthRequest, res: Response, next: Ne
 
 router.patch('/practice-owners/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = clean(ownerSchema.partial().parse(req.body));
     const before = await prisma.practiceOwner.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Owner not found' });
+    await assertRecordInTenant(req.tenantContext!, 'practices', data.practiceId || before.practiceId);
     if (('ssn' in data) && !canSeeSensitive(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify sensitive identifiers' });
     const practiceId = data.practiceId || before.practiceId;
     const percent = data.ownershipPercent !== undefined ? Number(data.ownershipPercent) : Number(before.ownershipPercent);
@@ -176,11 +189,13 @@ router.patch('/practice-owners/:id', async (req: AuthRequest, res: Response, nex
 
 router.delete('/practice-owners/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
     const before = await prisma.practiceOwner.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Owner not found' });
+    await assertRecordInTenant(req.tenantContext!, 'practices', before.practiceId);
     await prisma.practiceOwner.delete({ where: { id: before.id } });
     await audit(req, 'DELETE', 'practiceOwners', before.id, { ...before, ssn: before.ssn ? '[REDACTED]' : null }, undefined);
     res.status(204).end();
@@ -189,7 +204,8 @@ router.delete('/practice-owners/:id', async (req: AuthRequest, res: Response, ne
 
 router.get('/facilities/:id/detail', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id);
+    requireTenantContext(req.tenantContext);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id, req.tenantContext);
     const facility = await prisma.facility.findUnique({
       where: { id: req.params.id },
       include: {
@@ -210,7 +226,8 @@ router.get('/facilities/:id/detail', async (req: AuthRequest, res: Response, nex
 /** Lightweight facility-scoped provider list (same ProviderFacility join as detail). */
 router.get('/facilities/:id/providers', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id);
+    requireTenantContext(req.tenantContext);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id, req.tenantContext);
     const facility = await prisma.facility.findUnique({
       where: { id: req.params.id },
       select: { id: true }
@@ -234,8 +251,10 @@ router.get('/facilities/:id/providers', async (req: AuthRequest, res: Response, 
 
 router.get('/facility-contacts', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     const facilityId = String(req.query.facilityId || '').trim();
     if (!facilityId) return res.status(400).json({ error: 'facilityId is required' });
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', facilityId, req.tenantContext);
     const kind = String(req.query.kind || '').trim();
     const rows = await prisma.facilityContact.findMany({
       where: { facilityId, ...(kind ? { kind: kind as any } : {}) },
@@ -247,8 +266,10 @@ router.get('/facility-contacts', async (req: AuthRequest, res: Response, next: N
 
 router.post('/facility-contacts', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = clean(contactSchema.parse(req.body));
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', data.facilityId, req.tenantContext);
     const row = await prisma.facilityContact.create({ data });
     await audit(req, 'CREATE', 'facilityContacts', row.id, undefined, row);
     res.status(201).json(row);
@@ -257,10 +278,12 @@ router.post('/facility-contacts', async (req: AuthRequest, res: Response, next: 
 
 router.patch('/facility-contacts/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = clean(contactObjectSchema.partial().parse(req.body));
     const before = await prisma.facilityContact.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Contact not found' });
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', data.facilityId || before.facilityId, req.tenantContext);
     const row = await prisma.facilityContact.update({ where: { id: before.id }, data });
     await audit(req, 'UPDATE', 'facilityContacts', row.id, before, row);
     res.json(row);
@@ -269,11 +292,13 @@ router.patch('/facility-contacts/:id', async (req: AuthRequest, res: Response, n
 
 router.delete('/facility-contacts/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
     const before = await prisma.facilityContact.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Contact not found' });
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', before.facilityId, req.tenantContext);
     await prisma.facilityContact.delete({ where: { id: before.id } });
     await audit(req, 'DELETE', 'facilityContacts', before.id, before, undefined);
     res.status(204).end();
@@ -282,7 +307,9 @@ router.delete('/facility-contacts/:id', async (req: AuthRequest, res: Response, 
 
 router.put('/facilities/:id/schedule', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.id, req.tenantContext);
     const schedule = scheduleSchema.parse(req.body?.schedule ?? req.body);
     const before = await prisma.facility.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Facility not found' });
@@ -294,6 +321,7 @@ router.put('/facilities/:id/schedule', async (req: AuthRequest, res: Response, n
 
 router.post('/provider-facilities', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = z.object({
       providerId: z.string().min(1),
@@ -302,7 +330,8 @@ router.post('/provider-facilities', async (req: AuthRequest, res: Response, next
       effectiveAt: z.coerce.date().optional().nullable(),
       endAt: z.coerce.date().optional().nullable()
     }).parse(req.body);
-    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', data.facilityId);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', data.facilityId, req.tenantContext);
+    await assertProviderInTenant(req.tenantContext!.tenantId, data.providerId);
     const provider = await prisma.provider.findUnique({ where: { id: data.providerId }, select: { id: true } });
     if (!provider) return res.status(400).json({ error: 'Provider not found' });
     const facility = await prisma.facility.findUnique({ where: { id: data.facilityId }, select: { id: true } });
@@ -323,10 +352,12 @@ router.post('/provider-facilities', async (req: AuthRequest, res: Response, next
 
 router.delete('/provider-facilities/:providerId/:facilityId', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
-    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.facilityId);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'facilities', req.params.facilityId, req.tenantContext);
+    await assertProviderInTenant(req.tenantContext!.tenantId, req.params.providerId);
     const before = await prisma.providerFacility.findUnique({
       where: { providerId_facilityId: { providerId: req.params.providerId, facilityId: req.params.facilityId } }
     });
@@ -341,6 +372,7 @@ router.delete('/provider-facilities/:providerId/:facilityId', async (req: AuthRe
 
 router.post('/provider-practices', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
+    requireTenantContext(req.tenantContext);
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
     const data = z.object({
       providerId: z.string().min(1),
@@ -349,6 +381,8 @@ router.post('/provider-practices', async (req: AuthRequest, res: Response, next:
       effectiveAt: z.coerce.date().optional().nullable(),
       endAt: z.coerce.date().optional().nullable()
     }).parse(req.body);
+    await assertRecordInTenant(req.tenantContext!, 'practices', data.practiceId);
+    await assertProviderInTenant(req.tenantContext!.tenantId, data.providerId);
     const row = await prisma.providerPractice.upsert({
       where: { providerId_practiceId: { providerId: data.providerId, practiceId: data.practiceId } },
       update: { affiliationTitle: data.affiliationTitle || undefined, effectiveAt: data.effectiveAt || undefined, endAt: data.endAt || undefined },

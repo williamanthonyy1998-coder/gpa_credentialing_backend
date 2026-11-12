@@ -1,6 +1,19 @@
 import 'dotenv/config';
 import bcrypt from 'bcryptjs';
-import { PrismaClient, Role, RecordStatus, DocumentStatus, CaseStatus, EnrollmentStatus, TaskStatus, Priority } from '@prisma/client';
+import {
+  PrismaClient,
+  Role,
+  RecordStatus,
+  DocumentStatus,
+  CaseStatus,
+  EnrollmentStatus,
+  TaskStatus,
+  Priority,
+  TenantStatus,
+  TenantRole,
+  TenantMembershipStatus,
+} from '@prisma/client';
+import { seedDirectories } from './seed-directories';
 
 const prisma = new PrismaClient();
 const SEED_PASSWORD = process.env.SEED_DEFAULT_PASSWORD || 'LocalDemo-ChangeThis-2026!';
@@ -18,6 +31,41 @@ async function main() {
   ];
   for (const u of users) await prisma.user.upsert({ where: { email: u.email }, update: { id: u.id, name: u.name, role: u.role, active: true }, create: { ...u, passwordHash, active: true } });
 
+  // Phase 0A: demo tenant only. Seed organizations are explicitly linked here.
+  // Non-seed / legacy Organization rows are intentionally left with tenantId = null
+  // (no automatic guessing of client ownership).
+  const demoTenant = await prisma.tenant.upsert({
+    where: { id: 'seed-tenant-demo' },
+    update: { name: 'Demo GPA Client Account', slug: 'demo-gpa-client', status: TenantStatus.ACTIVE },
+    create: {
+      id: 'seed-tenant-demo',
+      name: 'Demo GPA Client Account',
+      slug: 'demo-gpa-client',
+      status: TenantStatus.ACTIVE,
+    },
+  });
+
+  const tenantMemberships = [
+    { id: 'seed-tm-admin', userId: 'seed-user-admin', role: TenantRole.TENANT_ADMIN },
+    { id: 'seed-tm-manager', userId: 'seed-user-manager', role: TenantRole.CREDENTIALING_MANAGER },
+    { id: 'seed-tm-credentialing', userId: 'seed-user-credentialing', role: TenantRole.CREDENTIALING_SPECIALIST },
+    { id: 'seed-tm-enrollment', userId: 'seed-user-enrollment', role: TenantRole.ENROLLMENT_SPECIALIST },
+    { id: 'seed-tm-approver', userId: 'seed-user-approver', role: TenantRole.APPROVER },
+  ];
+  for (const m of tenantMemberships) {
+    await prisma.tenantMembership.upsert({
+      where: { userId_tenantId: { userId: m.userId, tenantId: demoTenant.id } },
+      update: { id: m.id, role: m.role, status: TenantMembershipStatus.ACTIVE },
+      create: {
+        id: m.id,
+        userId: m.userId,
+        tenantId: demoTenant.id,
+        role: m.role,
+        status: TenantMembershipStatus.ACTIVE,
+      },
+    });
+  }
+
   const orgData = [
     { id: 'seed-org-01', legalName: 'Demo Lone Star Medical Group LLC', dba: 'Lone Star Family Care', taxId: 'DEMO-TAX-1001', establishedAt: d('2017-03-15'), contactName: 'Taylor Morgan', contactTitle: 'Practice Administrator', phone: '555-0101', fax: '555-0191', email: 'admin1@example.test', mailingAddress: addr('100 Demo Medical Plaza', 'Houston', 'TX', '77002'), ownership: { status: 'Privately Held', classification: 'LLC', ownerCount: 2 }, bankName: 'Demo Community Bank', bankAccountTitle: 'Lone Star Medical Group LLC', bankContactName: 'Demo Banking Desk', bankContactPhone: '555-0181', bankContactEmail: 'banking1@example.test' },
     { id: 'seed-org-02', legalName: 'Demo Gulf Coast Primary Care PLLC', dba: 'Gulf Coast Primary Care', taxId: 'DEMO-TAX-1002', establishedAt: d('2019-06-01'), contactName: 'Jordan Lee', contactTitle: 'Operations Lead', phone: '555-0102', fax: '555-0192', email: 'admin2@example.test', mailingAddress: addr('200 Sample Bay Road', 'Sugar Land', 'TX', '77478'), ownership: { status: 'Privately Held', classification: 'PLLC', ownerCount: 1 }, bankName: 'Demo Regional Bank', bankAccountTitle: 'Gulf Coast Primary Care PLLC', bankContactName: 'Demo Banking Desk', bankContactPhone: '555-0182', bankContactEmail: 'banking2@example.test' },
@@ -25,7 +73,13 @@ async function main() {
     { id: 'seed-org-04', legalName: 'Demo Bayou Cardiology Associates PA', dba: 'Bayou Cardiology', taxId: 'DEMO-TAX-1004', establishedAt: d('2015-11-20'), contactName: 'Avery Brooks', contactTitle: 'Credentialing Coordinator', phone: '555-0104', fax: '555-0194', email: 'admin4@example.test', mailingAddress: addr('400 Demo Heart Center', 'Katy', 'TX', '77494'), ownership: { status: 'Privately Held', classification: 'PA', ownerCount: 3 }, bankName: 'Demo Regional Bank', bankAccountTitle: 'Bayou Cardiology Associates PA', bankContactName: 'Demo Banking Desk', bankContactPhone: '555-0184', bankContactEmail: 'banking4@example.test' },
     { id: 'seed-org-05', legalName: 'Demo Northside Specialty Clinic Inc', dba: 'Northside Specialty Clinic', taxId: 'DEMO-TAX-1005', establishedAt: d('2018-08-05'), contactName: 'Morgan Ellis', contactTitle: 'Office Manager', phone: '555-0105', fax: '555-0195', email: 'admin5@example.test', mailingAddress: addr('500 Training Clinic Lane', 'Spring', 'TX', '77373'), ownership: { status: 'Privately Held', classification: 'Corporation', ownerCount: 2 }, bankName: 'Demo Community Bank', bankAccountTitle: 'Northside Specialty Clinic Inc', bankContactName: 'Demo Banking Desk', bankContactPhone: '555-0185', bankContactEmail: 'banking5@example.test' },
   ];
-  for (const org of orgData) await prisma.organization.upsert({ where: { id: org.id }, update: org, create: { ...org, status: RecordStatus.ACTIVE } });
+  for (const org of orgData) {
+    await prisma.organization.upsert({
+      where: { id: org.id },
+      update: { ...org, tenantId: demoTenant.id },
+      create: { ...org, status: RecordStatus.ACTIVE, tenantId: demoTenant.id },
+    });
+  }
 
   const practicesData = [
     { id: 'seed-practice-01', organizationId: 'seed-org-01', name: 'Lone Star Family Medicine', legalName: 'Lone Star Medical Group LLC', npi: '1999999001', taxId: 'DEMO-TAX-1001', dba: 'Lone Star Family Care', taxonomyCode: '207Q00000X', establishedAt: d('2017-03-15'), contactName: 'Taylor Morgan', contactTitle: 'Practice Administrator', phone: '555-1101', fax: '555-1191', email: 'practice1@example.test', mailingAddress: addr('100 Demo Medical Plaza', 'Houston', 'TX', '77002'), primaryAddress: addr('101 Demo Medical Plaza', 'Houston', 'TX', '77002') },
@@ -58,6 +112,11 @@ async function main() {
     await prisma.providerPractice.upsert({ where: { providerId_practiceId: { providerId: p.id, practiceId: practicesData[i].id } }, update: { affiliationTitle: 'Rendering Provider', effectiveAt: d('2025-01-01') }, create: { providerId: p.id, practiceId: practicesData[i].id, affiliationTitle: 'Rendering Provider', effectiveAt: d('2025-01-01') } });
     await prisma.providerFacility.upsert({ where: { providerId_facilityId: { providerId: p.id, facilityId: facilitiesData[i].id } }, update: { approvalStatus: i === 0 ? 'Approved' : 'Pending', effectiveAt: d('2025-01-01') }, create: { providerId: p.id, facilityId: facilitiesData[i].id, approvalStatus: i === 0 ? 'Approved' : 'Pending', effectiveAt: d('2025-01-01') } });
     await prisma.license.upsert({ where: { id: `seed-license-0${i + 1}` }, update: { providerId: p.id, type: 'State Medical License', number: `DEMO-TX-LIC-${1001 + i}`, state: 'TX', issuedAt: d('2023-01-15'), expiresAt: d(`202${7 + (i % 2)}-12-31`), status: i === 0 ? DocumentStatus.VERIFIED : DocumentStatus.RECEIVED, issuingBody: 'Texas Medical Board (demo record)', notes: 'Synthetic training data; not a real credential.' }, create: { id: `seed-license-0${i + 1}`, providerId: p.id, type: 'State Medical License', number: `DEMO-TX-LIC-${1001 + i}`, state: 'TX', issuedAt: d('2023-01-15'), expiresAt: d(`202${7 + (i % 2)}-12-31`), status: i === 0 ? DocumentStatus.VERIFIED : DocumentStatus.RECEIVED, issuingBody: 'Texas Medical Board (demo record)', notes: 'Synthetic training data; not a real credential.' } });
+    await prisma.tenantProvider.upsert({
+      where: { tenantId_providerId: { tenantId: demoTenant.id, providerId: p.id } },
+      update: {},
+      create: { tenantId: demoTenant.id, providerId: p.id }
+    });
   }
 
   const documentData = [
@@ -67,7 +126,13 @@ async function main() {
     { id: 'seed-document-04', title: 'Professional Liability Certificate - Demo 04', type: 'Professional Liability', status: DocumentStatus.RECEIVED, originalName: 'demo-malpractice-04.pdf', mimeType: 'application/pdf', sizeBytes: 145000, issuedAt: d('2025-01-01'), expiresAt: d('2026-12-31'), verifiedAt: null, verifiedBy: null, providerId: 'seed-provider-04', notes: 'Synthetic training record; expiry is illustrative.' },
     { id: 'seed-document-05', title: 'Facility Occupancy Certificate - Demo 05', type: 'Certificate of Occupancy', status: DocumentStatus.MISSING, originalName: null, mimeType: null, sizeBytes: null, issuedAt: null, expiresAt: null, verifiedAt: null, verifiedBy: null, facilityId: 'seed-facility-05', notes: 'Example missing-document task.' },
   ];
-  for (const x of documentData) await prisma.document.upsert({ where: { id: x.id }, update: x, create: x });
+  for (const x of documentData) {
+    await prisma.document.upsert({
+      where: { id: x.id },
+      update: { ...x, tenantId: demoTenant.id },
+      create: { ...x, tenantId: demoTenant.id }
+    });
+  }
 
   const caseData = [
     { id: 'seed-case-01', caseNumber: 'DEMO-CRED-0001', providerId: 'seed-provider-01', practiceId: 'seed-practice-01', status: CaseStatus.APPROVED, assignedTo: 'manager@example.com', dueAt: d('2026-11-15'), submittedAt: d('2026-09-01'), decisionAt: d('2026-09-15'), decisionBy: 'Demo Approver', decisionReason: 'Approved for demo workflow testing', checklist: [{ item: 'Identity', status: 'verified' }, { item: 'State license', status: 'verified' }, { item: 'Education', status: 'verified' }], notes: 'Synthetic demo case; approval is not a real credentialing decision.' },
@@ -77,7 +142,11 @@ async function main() {
     { id: 'seed-case-05', caseNumber: 'DEMO-CRED-0005', providerId: 'seed-provider-05', practiceId: 'seed-practice-05', status: CaseStatus.ON_HOLD, assignedTo: 'credentialing@example.com', dueAt: d('2026-11-25'), submittedAt: null, decisionAt: null, decisionBy: null, decisionReason: null, checklist: [{ item: 'Provider application', status: 'pending' }, { item: 'License', status: 'pending' }], notes: 'On hold pending provider response.' },
   ];
   for (const c of caseData) {
-    await prisma.credentialingCase.upsert({ where: { caseNumber: c.caseNumber }, update: c, create: c });
+    await prisma.credentialingCase.upsert({
+      where: { caseNumber: c.caseNumber },
+      update: { ...c, tenantId: demoTenant.id },
+      create: { ...c, tenantId: demoTenant.id }
+    });
     const saved = await prisma.credentialingCase.findUniqueOrThrow({ where: { caseNumber: c.caseNumber } });
     await prisma.statusHistory.upsert({ where: { id: `seed-case-history-${c.id}` }, update: { toStatus: saved.status, changedBy: 'seed-script', reason: 'Seeded demo workflow history', caseId: saved.id }, create: { id: `seed-case-history-${c.id}`, toStatus: saved.status, changedBy: 'seed-script', reason: 'Seeded demo workflow history', caseId: saved.id } });
   }
@@ -108,7 +177,11 @@ async function main() {
     { id: 'seed-enroll-05', applicationNo: 'DEMO-ENR-0005', providerId: 'seed-provider-05', practiceId: 'seed-practice-05', payerPlanId: 'seed-plan-05', status: EnrollmentStatus.PREPARING, assignedTo: 'enrollment@example.com', dueAt: d('2026-11-22'), submittedAt: null, referenceNo: null, lastFollowUpAt: null, nextFollowUpAt: d('2026-11-02'), effectiveAt: null, decisionAt: null, decisionReason: null, checklist: [{ item: 'Application', status: 'in progress' }, { item: 'Disclosure forms', status: 'missing' }], notes: 'Complete checklist before submission.' },
   ];
   for (const e of enrollmentData) {
-    await prisma.enrollmentApplication.upsert({ where: { applicationNo: e.applicationNo }, update: e, create: e });
+    await prisma.enrollmentApplication.upsert({
+      where: { applicationNo: e.applicationNo },
+      update: { ...e, tenantId: demoTenant.id },
+      create: { ...e, tenantId: demoTenant.id }
+    });
     const saved = await prisma.enrollmentApplication.findUniqueOrThrow({ where: { applicationNo: e.applicationNo } });
     await prisma.statusHistory.upsert({ where: { id: `seed-enroll-history-${e.id}` }, update: { toStatus: saved.status, changedBy: 'seed-script', reason: 'Seeded demo enrollment history', enrollmentId: saved.id }, create: { id: `seed-enroll-history-${e.id}`, toStatus: saved.status, changedBy: 'seed-script', reason: 'Seeded demo enrollment history', enrollmentId: saved.id } });
   }
@@ -120,7 +193,13 @@ async function main() {
     { id: 'seed-task-04', title: 'Follow up with payer on Demo Enrollment 0003', description: 'Confirm requested malpractice certificate requirements and log payer response.', status: TaskStatus.OPEN, priority: Priority.URGENT, dueAt: d('2026-10-29'), assignedToId: 'seed-user-enrollment', createdById: 'seed-user-admin', caseId: null, enrollmentId: 'seed-enroll-03' },
     { id: 'seed-task-05', title: 'Complete payer application checklist', description: 'Collect remaining disclosure form and validate required fields before submission.', status: TaskStatus.BLOCKED, priority: Priority.NORMAL, dueAt: d('2026-11-02'), assignedToId: 'seed-user-enrollment', createdById: 'seed-user-manager', caseId: null, enrollmentId: 'seed-enroll-05' },
   ];
-  for (const t of taskData) await prisma.task.upsert({ where: { id: t.id }, update: t, create: t });
+  for (const t of taskData) {
+    await prisma.task.upsert({
+      where: { id: t.id },
+      update: { ...t, tenantId: demoTenant.id },
+      create: { ...t, tenantId: demoTenant.id }
+    });
+  }
 
   const auditData = [
     { id: 'seed-audit-01', actorId: 'seed-user-admin', organizationId: 'seed-org-01', action: 'SEED_CREATE', entityType: 'Organization', entityId: 'seed-org-01', after: { legalName: 'Demo Lone Star Medical Group LLC' } },
@@ -129,7 +208,13 @@ async function main() {
     { id: 'seed-audit-04', actorId: 'seed-user-enrollment', organizationId: 'seed-org-04', action: 'SEED_CREATE', entityType: 'EnrollmentApplication', entityId: 'seed-enroll-04', after: { status: 'PAYER_REVIEW' } },
     { id: 'seed-audit-05', actorId: 'seed-user-approver', organizationId: 'seed-org-05', action: 'SEED_CREATE', entityType: 'Task', entityId: 'seed-task-05', after: { status: 'BLOCKED' } },
   ];
-  for (const a of auditData) await prisma.auditEvent.upsert({ where: { id: a.id }, update: a, create: a });
+  for (const a of auditData) {
+    await prisma.auditEvent.upsert({
+      where: { id: a.id },
+      update: { ...a, tenantId: demoTenant.id },
+      create: { ...a, tenantId: demoTenant.id }
+    });
+  }
 
   const leaveTypes = [
     { id: 'seed-leave-annual', name: 'Annual Leave', code: 'ANNUAL', paid: true, annualDays: 15 },
@@ -150,8 +235,10 @@ async function main() {
     }
   }
 
+  await seedDirectories(prisma);
+
   console.log('Seed complete. Synthetic demo data created/updated:');
-  console.log('- 5 users, organizations, practices, facilities, providers, licenses, documents, credentialing cases, payers, plans, enrollments, tasks, audit events, leave types/balances.');
+  console.log('- 1 demo tenant (demo-gpa-client), 5 tenant memberships, 5 users, organizations, practices, facilities, providers, licenses, documents, credentialing cases, payers, plans, enrollments, tasks, audit events, leave types/balances.');
   console.log(`Local demo password for all seeded users: ${SEED_PASSWORD}`);
   console.log('All names, identifiers, contact details, documents, and payer outcomes are synthetic test data. Do not use as real credentialing evidence.');
 }

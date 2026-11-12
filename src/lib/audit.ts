@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client';
 import { prisma } from './prisma';
 import { AuthRequest } from '../middleware/auth';
 
-const REDACT_KEYS = /^(ssn|bankAccountNumber|bankRoutingNumber|bankPhoneNumber|bankTitle|bankAccountHolder|passwordHash|policyNumber|perOccurrence|aggregate|storageKey|signedUrl)$/i;
+const REDACT_KEYS = /^(ssn|taxId|bankAccountNumber|bankRoutingNumber|bankPhoneNumber|bankTitle|bankAccountHolder|passwordHash|policyNumber|perOccurrence|aggregate|storageKey|signedUrl|token|tokenHash|rawToken|invitationToken|accessToken|refreshToken)$/i;
 
 function isDecimalLike(value: unknown): value is { toNumber: () => number; toString: () => string } {
   if (value == null || typeof value !== 'object') return false;
@@ -55,9 +55,16 @@ export async function audit(req: AuthRequest, action: string, entityType: string
   if (!organizationId && entityType === 'tasks' && snapshot?.caseId) {
     organizationId = (await prisma.credentialingCase.findUnique({ where: { id: snapshot.caseId }, select: { practice: { select: { organizationId: true } } } }))?.practice?.organizationId;
   }
+  const tenantId = req.tenantContext?.tenantId || undefined;
   await prisma.auditEvent.create({ data: {
-    actorId: req.user?.id, organizationId, action, entityType, entityId,
-    before: redact(before) as any, after: redact(after) as any,
+    actorId: req.user?.id,
+    tenantId,
+    organizationId,
+    action,
+    entityType,
+    entityId,
+    before: redact(before) as any,
+    after: redact(after) as any,
     ipAddress: req.ip
   }});
 }
