@@ -50,8 +50,10 @@ import { prisma } from './lib/prisma';
 import {
   assertProductionSecurityIntegrations,
   assertSafeRuntimeConfig,
+  isCorsOriginAllowed,
   isE2eLoginBypassAllowed,
-  resolveCorsOrigins
+  isProductionRuntime,
+  resolveTrustProxySetting
 } from './lib/runtimeSecurity';
 import { startAutomationScheduler, stopAutomationScheduler } from './services/automationScheduler';
 
@@ -61,16 +63,31 @@ assertProductionSecurityIntegrations();
 
 const app = express();
 app.disable('x-powered-by');
+// Must run before express-rate-limit so X-Forwarded-For from Vercel is trusted safely (1 hop).
+app.set('trust proxy', resolveTrustProxySetting());
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 app.use(cors({
-  origin: resolveCorsOrigins(),
-  credentials: true
+  origin(origin, callback) {
+    // Non-browser clients (no Origin) are fine; browsers must match WEB_ORIGIN exactly.
+    if (!origin) return callback(null, true);
+    if (isCorsOriginAllowed(origin)) return callback(null, origin);
+    return callback(null, false);
+  },
+  credentials: true,
+  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'X-CSRF-Token',
+    'X-Tenant-Id',
+    'X-Platform-Access'
+  ]
 }));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
-app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
+app.use(morgan(isProductionRuntime() ? 'combined' : 'dev'));
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 500, standardHeaders: true, legacyHeaders: false }));
 // Dedicated login limiter. E2E may raise/skip limits only in non-production when
 // E2E_SAFE_DATABASE=1 AND DATABASE_URL clearly targets an *_e2e / *_test database.
@@ -88,6 +105,11 @@ app.use(
 app.get('/health', async (_req, res) => {
   try { await prisma.$queryRaw`SELECT 1`; res.json({ status: 'ok', database: 'connected' }); }
   catch { res.status(503).json({ status: 'degraded', database: 'unavailable' }); }
+});
+
+// Public API root (does not weaken authenticated resource routes mounted later).
+app.get('/api', (_req, res) => {
+  res.json({ ok: true, service: 'credentialing-api' });
 });
 
 app.use('/api/auth', authRoutes);
@@ -143,7 +165,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   if (err?.code === 'P2003') return res.status(400).json({ error: 'Referenced record does not exist or is still in use' });
   console.error(err);
   return res.status(500).json({
-    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : (err?.message || 'Internal server error')
+    error: isProductionRuntime() ? 'Internal server error' : (err?.message || 'Internal server error')
   });
 });
 

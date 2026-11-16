@@ -4,20 +4,52 @@
  */
 import crypto from 'node:crypto';
 import { Response, CookieOptions } from 'express';
+import { isProductionRuntime, parseWebOrigins, type RuntimeEnv } from './runtimeSecurity';
 
 export const SESSION_COOKIE = process.env.SESSION_COOKIE_NAME || 'gpa_session';
 export const CSRF_COOKIE = process.env.CSRF_COOKIE_NAME || 'gpa_csrf';
 export const CSRF_HEADER = 'x-csrf-token';
 
+function apiPublicHostname(env: RuntimeEnv = process.env): string | null {
+  const candidates = [
+    env.API_PUBLIC_URL,
+    env.VERCEL_URL ? `https://${env.VERCEL_URL}` : undefined
+  ];
+  for (const raw of candidates) {
+    if (!raw) continue;
+    try {
+      const host = new URL(raw.includes('://') ? raw : `https://${raw}`).hostname.toLowerCase();
+      if (host) return host;
+    } catch { /* ignore */ }
+  }
+  return null;
+}
+
+/** Separate Vercel frontend/backend projects are cross-site; browsers require SameSite=None. */
+export function shouldUseCrossSiteCookies(env: RuntimeEnv = process.env): boolean {
+  if (env.CROSS_SITE_COOKIES === '1') return true;
+  if (env.CROSS_SITE_COOKIES === '0') return false;
+  const webOrigin = parseWebOrigins(env)[0];
+  const apiHost = apiPublicHostname(env);
+  if (!webOrigin || !apiHost) return false;
+  try {
+    return new URL(webOrigin).hostname.toLowerCase() !== apiHost;
+  } catch {
+    return false;
+  }
+}
+
 export function cookieSecure(): boolean {
   if (process.env.COOKIE_SECURE === '1') return true;
   if (process.env.COOKIE_SECURE === '0') return false;
-  return process.env.NODE_ENV === 'production';
+  if (shouldUseCrossSiteCookies()) return true;
+  return isProductionRuntime();
 }
 
 export function cookieSameSite(): 'lax' | 'strict' | 'none' {
-  const raw = String(process.env.COOKIE_SAMESITE || 'lax').toLowerCase();
+  const raw = String(process.env.COOKIE_SAMESITE || '').toLowerCase();
   if (raw === 'strict' || raw === 'none' || raw === 'lax') return raw;
+  if (shouldUseCrossSiteCookies()) return 'none';
   return 'lax';
 }
 

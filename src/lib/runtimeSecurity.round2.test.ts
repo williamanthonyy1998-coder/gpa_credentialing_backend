@@ -4,10 +4,14 @@ import {
   assertSafeRuntimeConfig,
   databaseNameFromUrl,
   databaseUrlLooksIsolated,
+  isCorsOriginAllowed,
   isE2eLoginBypassAllowed,
   isFieldEncryptionKeyValid,
+  isProductionRuntime,
+  normalizeOrigin,
   parseWebOrigins,
-  resolveCorsOrigins
+  resolveCorsOrigins,
+  resolveTrustProxySetting
 } from './runtimeSecurity';
 
 const PROD_OK = {
@@ -99,4 +103,39 @@ test('helpers: isolated db name detection does not leak credentials', () => {
 
 test('production happy path with required vars', () => {
   assert.doesNotThrow(() => assertSafeRuntimeConfig(PROD_OK));
+});
+
+test('trust proxy: Vercel defaults to 1 hop (never bare true)', () => {
+  assert.equal(resolveTrustProxySetting({}), false);
+  assert.equal(resolveTrustProxySetting({ VERCEL: '1' }), 1);
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: 'true' }), 1);
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: '2' }), 2);
+  assert.equal(resolveTrustProxySetting({ TRUST_PROXY: 'false' }), false);
+});
+
+test('CORS: trailing slash on WEB_ORIGIN still matches browser Origin', () => {
+  const env = {
+    NODE_ENV: 'production',
+    WEB_ORIGIN: 'https://gpa-credentialing-dashboard.vercel.app/'
+  };
+  assert.equal(normalizeOrigin(env.WEB_ORIGIN), 'https://gpa-credentialing-dashboard.vercel.app');
+  assert.equal(
+    isCorsOriginAllowed('https://gpa-credentialing-dashboard.vercel.app', env),
+    true
+  );
+  assert.equal(isCorsOriginAllowed('https://evil.example.com', env), false);
+});
+
+test('production runtime detection includes Vercel', () => {
+  assert.equal(isProductionRuntime({ NODE_ENV: 'development', VERCEL: '1' }), true);
+  assert.equal(isProductionRuntime({ NODE_ENV: 'development' }), false);
+  assert.equal(
+    isE2eLoginBypassAllowed({
+      NODE_ENV: 'development',
+      VERCEL: '1',
+      E2E_SAFE_DATABASE: '1',
+      DATABASE_URL: 'postgresql://u:p@localhost:5432/credentialing_e2e'
+    }),
+    false
+  );
 });

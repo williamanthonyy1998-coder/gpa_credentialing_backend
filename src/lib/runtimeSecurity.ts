@@ -7,9 +7,36 @@ export type RuntimeEnv = Record<string, string | undefined>;
 
 const DEV_WEB_ORIGINS = 'http://localhost:5173,http://localhost:5174';
 
+/**
+ * Vercel sets `VERCEL=1` even if someone mistakenly copied NODE_ENV=development
+ * into project env vars. Use for cookies, error sanitization, and E2E bypass — not for
+ * storage/scanner hard-fail (those stay on NODE_ENV===production so ops can remediate).
+ */
+export function isProductionRuntime(env: RuntimeEnv = process.env): boolean {
+  return env.NODE_ENV === 'production' || env.VERCEL === '1' || Boolean(env.VERCEL);
+}
+
+/**
+ * Express `trust proxy` for reverse proxies (Vercel).
+ * Never return bare `true` — express-rate-limit rejects that as ERR_ERL_PERMISSIVE_TRUST_PROXY.
+ * Prefer a hop count so client-supplied X-Forwarded-For cannot trivially spoof rate-limit keys.
+ */
+export function resolveTrustProxySetting(env: RuntimeEnv = process.env): false | number | string {
+  const raw = String(env.TRUST_PROXY ?? '').trim().toLowerCase();
+  if (raw === '0' || raw === 'false' || raw === 'no') return false;
+  if (raw === '1' || raw === 'true' || raw === 'yes') return 1;
+  if (/^\d+$/.test(raw)) {
+    const hops = Number(raw);
+    return hops > 0 ? hops : false;
+  }
+  if (raw) return raw; // subnet / IP list (advanced)
+  if (env.VERCEL || env.SERVERLESS === '1') return 1;
+  return false;
+}
+
 /** E2E login rate-limit bypass is allowed only outside production against an isolated e2e/test DB. */
 export function isE2eLoginBypassAllowed(env: RuntimeEnv = process.env): boolean {
-  if (env.NODE_ENV === 'production') return false;
+  if (isProductionRuntime(env)) return false;
   if (env.E2E_SAFE_DATABASE !== '1') return false;
   const dbUrl = String(env.DATABASE_URL || '');
   return databaseUrlLooksIsolated(dbUrl);
@@ -64,13 +91,18 @@ export function isFieldEncryptionKeyValid(raw: string | undefined | null): boole
   return trimmed.length >= 32;
 }
 
+/** Strip trailing slashes so `https://app.example.com/` matches browser Origin. */
+export function normalizeOrigin(origin: string): string {
+  return String(origin || '').trim().replace(/\/+$/, '');
+}
+
 export function parseWebOrigins(env: RuntimeEnv = process.env): string[] {
   const raw = String(env.WEB_ORIGIN || '').trim();
   if (!raw) {
     if (env.NODE_ENV === 'production') return [];
-    return DEV_WEB_ORIGINS.split(',').map((x) => x.trim()).filter(Boolean);
+    return DEV_WEB_ORIGINS.split(',').map((x) => normalizeOrigin(x)).filter(Boolean);
   }
-  return raw.split(',').map((x) => x.trim()).filter(Boolean);
+  return raw.split(',').map((x) => normalizeOrigin(x)).filter(Boolean);
 }
 
 function assertValidOriginList(origins: string[], env: RuntimeEnv): void {
@@ -148,7 +180,7 @@ export function assertSafeRuntimeConfig(env: RuntimeEnv = process.env): void {
     }
   }
 
-  // SEC-16 / malware: deferred to assertSafeRuntimeConfigExtended to avoid circular imports in unit tests.
+  // SEC-16 / storage: deferred to assertSafeRuntimeConfigExtended to avoid circular imports in unit tests.
   // Callers that boot the server invoke assertProductionSecurityIntegrations().
 }
 
@@ -187,5 +219,14 @@ export function resolveCorsOrigins(env: RuntimeEnv = process.env): string[] {
   if (env.NODE_ENV === 'production') {
     assertValidOriginList(origins, env);
   }
-  return origins.length ? origins : DEV_WEB_ORIGINS.split(',').map((x) => x.trim());
+  return origins.length
+    ? origins
+    : DEV_WEB_ORIGINS.split(',').map((x) => normalizeOrigin(x)).filter(Boolean);
+}
+
+/** True when browser Origin is explicitly allowed (never reflects arbitrary Origin). */
+export function isCorsOriginAllowed(requestOrigin: string | undefined, env: RuntimeEnv = process.env): boolean {
+  if (!requestOrigin) return false;
+  const normalized = normalizeOrigin(requestOrigin);
+  return resolveCorsOrigins(env).some((allowed) => normalizeOrigin(allowed) === normalized);
 }
