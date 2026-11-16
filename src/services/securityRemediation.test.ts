@@ -252,11 +252,23 @@ test('C3: TEST_MOCK_SUCCEEDED enum exists and CONNECTED is distinct', () => {
 });
 
 test('H1: scanOrQuarantine returns QUARANTINED when scanner missing', async () => {
+  const prevRequired = process.env.MALWARE_SCAN_REQUIRED;
   delete process.env.MALWARE_SCANNER_ENABLED;
   delete process.env.MALWARE_SCANNER_URL;
+  delete process.env.CLAMAV_HOST;
+  delete process.env.MALWARE_SCAN_REQUIRED;
   const result = await scanOrQuarantine({ documentId: 'x', filePath: '/tmp/x' });
   assert.equal(result.scanned, false);
   assert.equal(result.status, 'QUARANTINED');
+  assert.match(result.reason, /not malware-scanned/i);
+  process.env.MALWARE_SCAN_REQUIRED = '0';
+  const waived = await scanOrQuarantine({ documentId: 'x', filePath: '/tmp/x' });
+  assert.equal(waived.scanned, false);
+  assert.equal(waived.status, 'QUARANTINED');
+  assert.match(waived.reason, /MALWARE_SCAN_REQUIRED=0/);
+  assert.match(waived.reason, /not malware-scanned|not virus-free/i);
+  if (prevRequired !== undefined) process.env.MALWARE_SCAN_REQUIRED = prevRequired;
+  else delete process.env.MALWARE_SCAN_REQUIRED;
 });
 
 test('H3: unauthorized manual release denied; short reason rejected', async () => {

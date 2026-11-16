@@ -239,12 +239,17 @@ export function assertProductionSecurityIntegrations(env: RuntimeEnv = process.e
     }
   }
 
-  if (env.MALWARE_SCAN_REQUIRED !== '0') {
+  // Explicit waiver: MALWARE_SCAN_REQUIRED=0 allows boot without a scanner.
+  // This disables malware scanning only — it does not weaken auth, ACL, MIME/magic validation, or storage privacy.
+  if (env.MALWARE_SCAN_REQUIRED === '0') {
+    // Documented risk acceptance: no scanner URL/host required.
+  } else {
     const scannerOk = Boolean(env.MALWARE_SCANNER_URL || env.CLAMAV_HOST || env.MALWARE_SCANNER_ENABLED === '1');
     if (!scannerOk) {
       throw new Error(
         '[security] Refusing to start: configure MALWARE_SCANNER_URL or CLAMAV_HOST, '
-        + 'or set MALWARE_SCAN_REQUIRED=0 with documented risk acceptance.'
+        + 'or set MALWARE_SCAN_REQUIRED=0 with documented risk acceptance '
+        + '(files will not be malware-scanned; see docs/MALWARE_SCANNING.md).'
       );
     }
   }

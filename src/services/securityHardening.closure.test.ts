@@ -86,6 +86,26 @@ test('production config refuses missing storage/scanner integrations', () => {
     SUPABASE_STORAGE_BUCKET: 'credentialing-docs',
     MALWARE_SCANNER_URL: 'https://scanner.example/scan'
   }));
+  // Explicit waiver: production boots without scanner URL/host when MALWARE_SCAN_REQUIRED=0.
+  assert.doesNotThrow(() => assertProductionSecurityIntegrations({
+    NODE_ENV: 'production',
+    OBJECT_STORAGE_DRIVER: 'supabase',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-key',
+    SUPABASE_STORAGE_BUCKET: 'credentialing-docs',
+    MALWARE_SCAN_REQUIRED: '0'
+  }));
+  assert.throws(
+    () => assertProductionSecurityIntegrations({
+      NODE_ENV: 'production',
+      OBJECT_STORAGE_DRIVER: 'supabase',
+      SUPABASE_URL: 'https://example.supabase.co',
+      SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-key',
+      SUPABASE_STORAGE_BUCKET: 'credentialing-docs'
+      // no scanner and no MALWARE_SCAN_REQUIRED=0
+    }),
+    /MALWARE_SCAN_REQUIRED=0|MALWARE_SCANNER_URL|CLAMAV_HOST/
+  );
   assert.doesNotThrow(() => assertProductionSecurityIntegrations({
     NODE_ENV: 'production',
     OBJECT_STORAGE_DRIVER: 's3',

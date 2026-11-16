@@ -20,10 +20,23 @@ export async function scanOrQuarantine(input: {
   filePath: string;
 }): Promise<ScanResult> {
   if (!isMalwareScannerConfigured()) {
+    const scanningDisabled = process.env.MALWARE_SCAN_REQUIRED === '0';
+    const reason = scanningDisabled
+      ? 'Malware scanning is disabled (MALWARE_SCAN_REQUIRED=0). This file was not malware-scanned and is not virus-free. Remains quarantined until authorized manual release.'
+      : 'Malware scanner is not configured. Document was not malware-scanned. Remains quarantined until authorized manual release.';
+    // Persist explicit non-scan markers when the row exists — never CLEAN / never claim a scan occurred.
+    await prisma.document.updateMany({
+      where: { id: input.documentId },
+      data: {
+        malwareScannedAt: null,
+        malwareScanStatus: scanningDisabled ? 'DISABLED' : 'NOT_CONFIGURED',
+        malwareScanDetail: reason.slice(0, 500)
+      }
+    }).catch(() => undefined);
     return {
       scanned: false,
       status: 'QUARANTINED',
-      reason: 'Malware scanner is not configured. Document remains quarantined until authorized manual release.'
+      reason
     };
   }
 
