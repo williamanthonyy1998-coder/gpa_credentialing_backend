@@ -6,7 +6,8 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
 }
 
 enum Role {
@@ -2406,7 +2407,7 @@ model ProviderProfileReview {
   @@index([providerId, updatedAt])
 }
 
-/// Phase 3D — On-demand credentialing QA scan run (not a background scheduler).
+/// Phase 3D ï¿½ On-demand credentialing QA scan run (not a background scheduler).
 model CredentialingQaScan {
   id                  String   @id @default(cuid())
   tenantId            String
@@ -2423,7 +2424,7 @@ model CredentialingQaScan {
   findingsBySeverity  Json?
   /// Non-sensitive summary / limits / continuation cursor.
   summary             Json?
-  /// Safe error message — never store secrets or full license numbers.
+  /// Safe error message ï¿½ never store secrets or full license numbers.
   errorMessage        String?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
@@ -2431,7 +2432,7 @@ model CredentialingQaScan {
   @@index([tenantId, status])
 }
 
-/// Phase 4D — external credentialing integration registry (foundation only).
+/// Phase 4D ï¿½ external credentialing integration registry (foundation only).
 /// CONNECTED requires an actual successful connection test. Manual portal ? API connected.
 enum ExternalIntegrationType {
   CAQH
@@ -2583,7 +2584,7 @@ model ExternalIntegrationOperation {
   initiatedBy       User?                    @relation("ExternalIntegrationOperationInitiator", fields: [initiatedById], references: [id], onDelete: SetNull)
   safeErrorCode     String?
   safeErrorSummary  String?
-  /// Non-sensitive metadata only — never store secrets or full PHI payloads.
+  /// Non-sensitive metadata only ï¿½ never store secrets or full PHI payloads.
   metadata          Json?
   createdAt         DateTime                 @default(now())
   updatedAt         DateTime                 @updatedAt
@@ -2595,7 +2596,7 @@ model ExternalIntegrationOperation {
   @@index([operationStatus, createdAt])
 }
 
-/// Phase 4E — payer enrollment revalidation (separate from credential expiration).
+/// Phase 4E ï¿½ payer enrollment revalidation (separate from credential expiration).
 enum EnrollmentRevalidationStatus {
   NOT_STARTED
   UPCOMING

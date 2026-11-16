@@ -16,7 +16,16 @@ import {
 import { seedDirectories } from './seed-directories';
 
 const prisma = new PrismaClient();
-const SEED_PASSWORD = process.env.SEED_DEFAULT_PASSWORD || 'LocalDemo-ChangeThis-2026!';
+
+function requireSeedPassword(): string {
+  const password = process.env.SEED_DEFAULT_PASSWORD;
+  if (!password || password.length < 16) {
+    throw new Error('A secure SEED_DEFAULT_PASSWORD is required.');
+  }
+  return password;
+}
+
+const SEED_PASSWORD = requireSeedPassword();
 const d = (value: string) => new Date(`${value}T12:00:00.000Z`);
 const addr = (street: string, city: string, state: string, zip: string) => ({ street, city, state, zip, county: city, country: 'USA' });
 
@@ -239,7 +248,7 @@ async function main() {
 
   console.log('Seed complete. Synthetic demo data created/updated:');
   console.log('- 1 demo tenant (demo-gpa-client), 5 tenant memberships, 5 users, organizations, practices, facilities, providers, licenses, documents, credentialing cases, payers, plans, enrollments, tasks, audit events, leave types/balances.');
-  console.log(`Local demo password for all seeded users: ${SEED_PASSWORD}`);
+
   console.log('All names, identifiers, contact details, documents, and payer outcomes are synthetic test data. Do not use as real credentialing evidence.');
 }
 

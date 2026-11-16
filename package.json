@@ -24,7 +24,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1168.0",
     "@aws-sdk/s3-request-presigner": "^3.1168.0",
-    "@prisma/client": "^6.19.0",
+    "@prisma/client": "^6.19.3",
     "@types/cookie-parser": "^1.4.10",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
@@ -39,7 +39,6 @@
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.20.2",
-    "prisma": "^6.19.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -53,6 +52,7 @@
     "@types/pdf-parse": "^1.1.4",
     "@types/pdfkit": "^0.17.7",
     "pg": "^8.23.1",
+    "prisma": "^6.19.3",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
