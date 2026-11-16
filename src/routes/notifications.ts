@@ -1,8 +1,50 @@
 import { Router, Response, NextFunction } from 'express';
+import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../middleware/auth';
+import {
+  getEffectivePreferences,
+  upsertPreferences,
+  NOTIFICATION_CATEGORIES
+} from '../services/notificationPreferences';
 
 const router = Router();
+
+router.get('/preferences', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const items = await getEffectivePreferences(req.user!.id);
+    res.json({ items, categories: NOTIFICATION_CATEGORIES });
+  } catch (e) { next(e); }
+});
+
+router.put('/preferences', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const body = z.object({
+      items: z.array(z.object({
+        category: z.string(),
+        channelInApp: z.boolean().optional(),
+        channelEmail: z.boolean().optional()
+      })).min(1)
+    }).parse(req.body);
+    const items = await upsertPreferences({
+      userId: req.user!.id,
+      actorId: req.user!.id,
+      items: body.items
+    });
+    res.json({ items });
+  } catch (e) { next(e); }
+});
+
+router.get('/deliveries', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    const rows = await prisma.notificationDelivery.findMany({
+      where: { userId: req.user!.id },
+      orderBy: { createdAt: 'desc' },
+      take: Math.min(100, Number(req.query.limit) || 40)
+    });
+    res.json({ items: rows });
+  } catch (e) { next(e); }
+});
 
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {

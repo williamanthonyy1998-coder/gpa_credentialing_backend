@@ -1,0 +1,11 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "npm install",
+  "buildCommand": "npm run build",
+  "functions": {
+    "src/server.ts": {
+      "maxDuration": 60,
+      "includeFiles": "{prisma/**,node_modules/.prisma/**,node_modules/@prisma/client/**}"
+    }
+  }
+}

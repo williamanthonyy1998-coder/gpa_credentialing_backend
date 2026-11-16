@@ -3,7 +3,8 @@ import { Priority, Role } from '@prisma/client';
 import { z } from 'zod';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertEnrollmentAccessFromReq } from '../services/enrollmentAccess';
 import {
   SUBMISSION_CHANNELS,
   COMMUNICATION_TYPES,
@@ -35,7 +36,7 @@ function audienceFor(req: AuthRequest) {
 router.get('/submissions', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listSubmissions(req.tenantContext!.tenantId!, req.params.id);
     res.json({
       items: rows.map((r) => sanitizeSubmissionForAudience(r, audienceFor(req))),
@@ -50,7 +51,7 @@ router.get('/submissions', async (req: AuthRequest, res: Response, next: NextFun
 router.get('/submissions/:submissionId', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listSubmissions(req.tenantContext!.tenantId!, req.params.id);
     const row = rows.find((r) => r.id === req.params.submissionId);
     if (!row) return res.status(404).json({ error: 'Submission not found' });
@@ -64,7 +65,7 @@ router.get('/submissions/:submissionId', async (req: AuthRequest, res: Response,
 router.get('/submissions/:submissionId/history', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listSubmissions(req.tenantContext!.tenantId!, req.params.id);
     res.json({
       items: rows.map((r) => sanitizeSubmissionForAudience(r, audienceFor(req))),
@@ -79,7 +80,7 @@ router.get('/submissions/:submissionId/history', async (req: AuthRequest, res: R
 router.post('/submissions/prepare', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may prepare payer submissions' });
     }
@@ -116,7 +117,7 @@ router.post('/submissions/prepare', async (req: AuthRequest, res: Response, next
 router.post('/submissions/confirm', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may confirm payer submissions' });
     }
@@ -163,7 +164,7 @@ router.post('/submissions/confirm', async (req: AuthRequest, res: Response, next
 router.get('/communications', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listCommunications(req.tenantContext!.tenantId!, req.params.id);
     res.json({ items: rows.map((r) => sanitizeCommunicationForAudience(r, audienceFor(req))) });
   } catch (e: any) {
@@ -175,7 +176,7 @@ router.get('/communications', async (req: AuthRequest, res: Response, next: Next
 router.post('/communications', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may record payer communications' });
     }
@@ -214,7 +215,7 @@ router.post('/communications', async (req: AuthRequest, res: Response, next: Nex
 router.get('/communications/:communicationId', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listCommunications(req.tenantContext!.tenantId!, req.params.id);
     const row = rows.find((r) => r.id === req.params.communicationId);
     if (!row) return res.status(404).json({ error: 'Communication not found' });
@@ -228,7 +229,7 @@ router.get('/communications/:communicationId', async (req: AuthRequest, res: Res
 router.get('/follow-ups', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await listFollowUps(req.tenantContext!.tenantId!, req.params.id);
     res.json({
       items: rows.map((r) => ({
@@ -245,7 +246,7 @@ router.get('/follow-ups', async (req: AuthRequest, res: Response, next: NextFunc
 router.post('/follow-ups', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may create enrollment follow-ups' });
     }
@@ -291,7 +292,7 @@ router.post('/follow-ups', async (req: AuthRequest, res: Response, next: NextFun
 router.post('/follow-ups/:followUpId/complete', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({ completionNotes: z.string().max(4000).optional().nullable() }).parse(req.body || {});
     const task = await completeFollowUp({
       tenantId: req.tenantContext!.tenantId!,
@@ -312,7 +313,7 @@ router.post('/follow-ups/:followUpId/complete', async (req: AuthRequest, res: Re
 router.post('/follow-ups/:followUpId/cancel', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({ reason: z.string().max(4000).optional().nullable() }).parse(req.body || {});
     const task = await cancelFollowUp({
       tenantId: req.tenantContext!.tenantId!,
@@ -333,7 +334,7 @@ router.post('/follow-ups/:followUpId/cancel', async (req: AuthRequest, res: Resp
 router.get('/timeline', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const data = await getEnrollmentTimeline(req.tenantContext!.tenantId!, req.params.id);
     res.json(data);
   } catch (e: any) {

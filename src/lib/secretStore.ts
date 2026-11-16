@@ -89,10 +89,17 @@ export async function resolveSecret(
   }
 
   if (parsed.backend === 'encref') {
-    // Ciphertext stored in tenant-scoped memory map under INTEGRATION_SECRET_* style id
-    const enc = tenantSecretMap.get(`encref::${parsed.key}`) || null;
+    // Key format: tenantId::secretId (preferred) or legacy secretId-only (denied when expectedTenantId set).
+    const [maybeTenant, maybeId] = parsed.key.includes('::')
+      ? parsed.key.split('::')
+      : [null, parsed.key];
+    if (options?.expectedTenantId) {
+      if (!maybeTenant || options.expectedTenantId !== maybeTenant) return null;
+    }
+    const mapKey = maybeTenant ? `encref::${maybeTenant}::${maybeId}` : `encref::${maybeId}`;
+    const enc = tenantSecretMap.get(mapKey) || null;
     if (!enc) return null;
-    return decryptField(enc.startsWith('enc:v1:') ? enc : null);
+    return decryptField(enc.startsWith('enc:v1:') || enc.startsWith('enc:v2:') ? enc : null);
   }
 
   if (parsed.backend === 'aws') {
@@ -162,7 +169,11 @@ export function configureEnvSecret(envVarName: string, plaintext: string | null 
 }
 
 /** Encrypt plaintext for local storage as encref — still never put raw secret in DB column. */
-export function configureLocalEncryptedSecret(secretId: string, plaintext: string): {
+export function configureLocalEncryptedSecret(
+  secretId: string,
+  plaintext: string,
+  options?: { tenantId?: string | null }
+): {
   secretRef: string;
   configured: boolean;
 } {
@@ -175,8 +186,15 @@ export function configureLocalEncryptedSecret(secretId: string, plaintext: strin
   const enc = encryptField(plaintext);
   if (!enc) return { secretRef: '', configured: false };
   const id = String(secretId).replace(/[^A-Za-z0-9_]/g, '').slice(0, 64) || 'secret';
-  tenantSecretMap.set(`encref::${id}`, enc);
-  return { secretRef: buildEncryptedLocalRef(id), configured: true };
+  const tenantId = String(options?.tenantId || '').trim();
+  if (!tenantId) {
+    throw Object.assign(
+      new Error('tenantId is required for local encrypted secrets (tenant isolation)'),
+      { status: 400, code: 'ENCREF_TENANT_REQUIRED' }
+    );
+  }
+  tenantSecretMap.set(`encref::${tenantId}::${id}`, enc);
+  return { secretRef: buildEncryptedLocalRef(`${tenantId}::${id}`), configured: true };
 }
 
 export function redactSecretsFromText(text: string | null | undefined): string {

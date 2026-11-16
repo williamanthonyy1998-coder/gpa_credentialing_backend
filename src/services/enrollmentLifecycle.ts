@@ -44,6 +44,13 @@ const TERMINAL: EnrollmentStatus[] = [
   EnrollmentStatus.CLOSED
 ];
 
+/** Statuses that must stop automated follow-up generation immediately (Phase 5C). */
+export const FOLLOW_UP_CLOSING_STATUSES: EnrollmentStatus[] = [
+  ...TERMINAL,
+  EnrollmentStatus.APPROVED,
+  EnrollmentStatus.EFFECTIVE
+];
+
 const ACTIVE_DUP_STATUSES: EnrollmentStatus[] = [
   EnrollmentStatus.NOT_STARTED,
   EnrollmentStatus.PREPARING,
@@ -275,6 +282,87 @@ async function loadEnrollment(tenantId: string, enrollmentId: string) {
   return row;
 }
 
+/**
+ * Immediately cancel automation-generated follow-up tasks when enrollment closes.
+ * Preserves task history; does not mutate official status; leaves unrelated tasks alone.
+ */
+export async function cancelFollowUpsOnClosingStatus(input: {
+  tenantId: string;
+  enrollmentId: string;
+  actorId: string;
+  actorRole: Role;
+  toStatus: EnrollmentStatus;
+  reason?: string | null;
+}) {
+  if (!FOLLOW_UP_CLOSING_STATUSES.includes(input.toStatus)) {
+    return { cancelled: 0, skipped: true as const };
+  }
+
+  return prisma.$transaction(async (tx) => {
+    const open = await tx.task.findMany({
+      where: {
+        tenantId: input.tenantId,
+        enrollmentId: input.enrollmentId,
+        source: ENROLLMENT_FOLLOWUP_SOURCE,
+        status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED] }
+      }
+    });
+
+    for (const task of open) {
+      await tx.task.update({
+        where: { id: task.id },
+        data: {
+          status: TaskStatus.CANCELLED,
+          completedAt: new Date(),
+          completionNotes:
+            input.reason
+            || `Follow-up cancelled: enrollment entered ${input.toStatus}`
+        }
+      });
+    }
+
+    await tx.enrollmentApplication.update({
+      where: { id: input.enrollmentId },
+      data: {
+        followUpStatus: 'CANCELLED',
+        nextFollowUpAt: null
+      }
+    });
+
+    await tx.statusHistory.create({
+      data: {
+        enrollmentId: input.enrollmentId,
+        fromStatus: input.toStatus,
+        toStatus: input.toStatus,
+        changedBy: input.actorId,
+        actorRole: input.actorRole,
+        eventType: 'FOLLOW_UP_CANCELLED_ON_TERMINAL',
+        reason: input.reason || `Cancelled ${open.length} open follow-up task(s)`,
+        metadata: {
+          cancelledTaskIds: open.map((t) => t.id),
+          cancelledCount: open.length
+        } as any
+      }
+    });
+
+    await tx.auditEvent.create({
+      data: {
+        actorId: input.actorId,
+        action: 'FOLLOW_UP_CANCELLED_ON_TERMINAL',
+        entityType: 'enrollments',
+        entityId: input.enrollmentId,
+        tenantId: input.tenantId,
+        after: {
+          toStatus: input.toStatus,
+          cancelledCount: open.length
+        } as any
+      }
+    });
+
+    return { cancelled: open.length, skipped: false as const };
+  });
+}
+
 export async function transitionEnrollment(input: {
   tenantId: string;
   enrollmentId: string;
@@ -322,10 +410,23 @@ export async function transitionEnrollment(input: {
     metadata: input.metadata
   });
 
+  let followUpCancellation: { cancelled: number; skipped: boolean } | undefined;
+  if (FOLLOW_UP_CLOSING_STATUSES.includes(input.toStatus) && before.status !== input.toStatus) {
+    followUpCancellation = await cancelFollowUpsOnClosingStatus({
+      tenantId: input.tenantId,
+      enrollmentId: before.id,
+      actorId: input.actorId,
+      actorRole: input.role,
+      toStatus: input.toStatus,
+      reason: input.reason
+    });
+  }
+
   return {
     ...updated,
     attention: computeEnrollmentAttention(updated),
     allowedTransitions: allowedEnrollmentTransitions(updated.status, input.role),
+    followUpCancellation,
     disclaimer:
       'Internal enrollment status is not automatic payer submission or payer approval. No CAQH/PECOS/Availity integration is active in Phase 4A.'
   };
@@ -929,3 +1030,20 @@ export async function validateEnrollmentRelationships(input: {
 
 // re-export helpers used by routes
 export { assertBillingEntityInTenant, assertTrustedEvidence, TERMINAL, ACTIVE_DUP_STATUSES };
+
+/** @deprecated Prefer cancelFollowUpsOnClosingStatus — kept for Phase 4C import compatibility. */
+export async function cancelOpenFollowUpsForTerminal(input: {
+  tenantId: string;
+  enrollmentId: string;
+  actorId: string;
+  reason: string;
+}) {
+  return cancelFollowUpsOnClosingStatus({
+    tenantId: input.tenantId,
+    enrollmentId: input.enrollmentId,
+    actorId: input.actorId,
+    actorRole: Role.ADMIN,
+    toStatus: EnrollmentStatus.CLOSED,
+    reason: input.reason
+  });
+}

@@ -176,7 +176,8 @@ export async function assertLicenseInTenant(tenantId: string, licenseId: string)
   const lic = await prisma.license.findUnique({ where: { id: licenseId } });
   if (!lic) deny('License not found', 404);
   await assertProviderInTenant(tenantId, lic.providerId);
-  if (lic.tenantId && lic.tenantId !== tenantId) deny('License not found', 404);
+  // RT-03: legacy null tenantId is unproven — deny rather than share across tenants.
+  if (!lic.tenantId || lic.tenantId !== tenantId) deny('License not found', 404);
   return lic;
 }
 
@@ -196,7 +197,7 @@ async function assertNoDuplicateActive(input: {
     where: {
       providerId: input.providerId,
       archived: false,
-      ...(input.tenantId ? { OR: [{ tenantId: input.tenantId }, { tenantId: null }] } : {}),
+      ...(input.tenantId ? { tenantId: input.tenantId } : {}),
       ...(input.excludeId ? { id: { not: input.excludeId } } : {})
     },
     select: {
@@ -631,16 +632,14 @@ export async function listProviderLicenses(
   const rows = await prisma.license.findMany({
     where: {
       providerId,
-      OR: [{ tenantId }, { tenantId: null }],
+      // RT-03: do not surface legacy null-tenantId licenses to any tenant.
+      tenantId,
       ...(opts?.includeArchived ? {} : { archived: false })
     },
     include: { licenseType: true, usState: true, renewals: { select: { id: true, expiresAt: true, verificationStatus: true } } },
     orderBy: [{ isPrimary: 'desc' }, { expiresAt: 'asc' }, { createdAt: 'desc' }]
   });
-  // Prefer tenant-scoped rows; if both null and matching tenant exist, still return provider licenses visible in tenant.
-  return rows
-    .filter((r) => !r.tenantId || r.tenantId === tenantId)
-    .map((r) => annotateLicense(r, audience));
+  return rows.map((r) => annotateLicense(r, audience));
 }
 
 export async function getLicenseHistory(tenantId: string, licenseId: string) {
@@ -660,7 +659,7 @@ export async function getLicenseExpirationSummary(tenantId: string, filters: {
 }) {
   const where: any = {
     archived: false,
-    OR: [{ tenantId }, { tenantId: null }],
+    tenantId,
     provider: { tenantLinks: { some: { tenantId } } }
   };
   if (filters.providerId) {

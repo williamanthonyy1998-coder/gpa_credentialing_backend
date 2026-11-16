@@ -10,14 +10,17 @@ import {
   computeEnrollmentAttention,
   validateEnrollmentRelationships
 } from '../services/enrollmentLifecycle';
-import { getAuthorizedOrganizationIds } from '../services/orgAccess';
+import {
+  assertOrganizationAccess,
+  getOrgRestrictionIds
+} from '../services/orgAccess';
 import {
   andWhere,
-  assertRecordInTenant,
   assertRelatedRecordsSameTenant,
   listWhereForResource,
   requireTenantContext
 } from '../services/tenantAccess';
+import { assertEnrollmentAccess, assertEnrollmentAccessFromReq } from '../services/enrollmentAccess';
 import { notifyUser } from '../services/notifications';
 import {
   AssigneeUser,
@@ -81,7 +84,8 @@ function enrich(row: any, role: Role, usersByEmail?: Map<string, AssigneeUser>, 
   };
 }
 
-function buildWhere(query: any, userEmail: string, tenantId: string, orgIds: string[]) {
+/** orgIds=null means unrestricted tenant staff; empty array means deny-all (restricted with no memberships). */
+function buildWhere(query: any, userEmail: string, tenantId: string, orgIds: string[] | null) {
   const where: any = {};
   const tenantScope = listWhereForResource('enrollments', tenantId);
   const and: any[] = tenantScope ? [tenantScope] : [];
@@ -126,14 +130,18 @@ function buildWhere(query: any, userEmail: string, tenantId: string, orgIds: str
     if (query.followUpTo) nextFollowUpAt.lte = new Date(String(query.followUpTo));
     and.push({ nextFollowUpAt });
   }
-  if (orgIds.length) {
-    and.push({
-      OR: [
-        { organizationId: { in: orgIds } },
-        { practice: { is: { organizationId: { in: orgIds } } } },
-        { facility: { is: { OR: [{ organizationId: { in: orgIds } }, { practice: { is: { organizationId: { in: orgIds } } } }] } } }
-      ]
-    });
+  if (orgIds !== null) {
+    if (!orgIds.length) {
+      and.push({ id: '__none__' });
+    } else {
+      and.push({
+        OR: [
+          { organizationId: { in: orgIds } },
+          { practice: { is: { organizationId: { in: orgIds } } } },
+          { facility: { is: { OR: [{ organizationId: { in: orgIds } }, { practice: { is: { organizationId: { in: orgIds } } } }] } } }
+        ]
+      });
+    }
   }
   if (and.length) where.AND = and;
   return where;
@@ -146,7 +154,7 @@ router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunctio
     requireTenantContext(req.tenantContext);
     await ensureOverdueFollowUpNotifications(req.user!.email, req.user!.id).catch(() => {});
     const tenantId = req.tenantContext!.tenantId;
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
     const base = buildWhere(req.query, req.user!.email, tenantId, orgIds);
     const statuses = Object.values(EnrollmentStatus);
     const counts = await Promise.all(statuses.map(async status => ({
@@ -176,7 +184,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
     const tenantId = req.tenantContext!.tenantId;
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
     const where = buildWhere(req.query, req.user!.email, tenantId, orgIds);
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || Number(req.query.limit) || 25));
@@ -333,13 +341,9 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
 
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
-    requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    await assertEnrollmentAccessFromReq(req);
     const row = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id }, include: enrollmentInclude });
     if (!row) return res.status(404).json({ error: 'Enrollment not found' });
-    const orgId = row.organizationId || (row as any).practice?.organizationId;
-    if (orgId && orgIds.length && !orgIds.includes(orgId)) return res.status(404).json({ error: 'Enrollment not found' });
     const usersByEmail = await loadAssigneeMap([row.assignedTo]);
     const unreadActivityCount = await unreadActivityCountForUser(row.id, req.user!.id);
     res.json(enrich(row, req.user!.role, usersByEmail, { unreadActivityCount }));
@@ -350,7 +354,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
   try {
     requireTenantContext(req.tenantContext);
     const tenantId = req.tenantContext!.tenantId;
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (([Role.READ_ONLY, Role.AUDITOR] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot modify enrollments' });
     }
@@ -407,11 +411,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
 
     const before = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Enrollment not found' });
-    const orgIds = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
-    const beforeOrgId = before.organizationId;
-    if (beforeOrgId && orgIds.length && !orgIds.includes(beforeOrgId)) {
-      return res.status(404).json({ error: 'Enrollment not found' });
-    }
+    const restriction = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
 
     const relationshipTouched = ['providerId', 'facilityId', 'practiceId', 'payerPlanId', 'payerId']
       .some(k => Object.prototype.hasOwnProperty.call(data, k));
@@ -445,6 +445,17 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
         facilityId: links.facilityId,
         providerId: links.providerId
       });
+      // RT-06 / SEC-03: new organization must be in the actor's authorized set.
+      if (links.organizationId) {
+        await assertOrganizationAccess(
+          req.user!.id,
+          req.user!.role,
+          links.organizationId,
+          req.tenantContext
+        );
+      } else if (restriction !== null) {
+        return res.status(404).json({ error: 'Enrollment not found' });
+      }
     }
 
     // Never allow client to change applicationNo; highlighting must not mutate status
@@ -531,7 +542,7 @@ router.post('/bulk-assign', allowRoles(Role.ADMIN, Role.CREDENTIALING_MANAGER, R
       assignedTo: z.string().min(1)
     }).parse(req.body);
     for (const id of input.ids) {
-      await assertRecordInTenant(req.tenantContext!, 'enrollments', id);
+      await assertEnrollmentAccess(req.user!.id, req.user!.role, id, req.tenantContext);
     }
     const result = await prisma.enrollmentApplication.updateMany({
       where: andWhere({ id: { in: input.ids } }, tenantScope)!,

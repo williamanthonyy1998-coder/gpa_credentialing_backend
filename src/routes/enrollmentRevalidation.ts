@@ -3,7 +3,12 @@ import { RevalidationDueDateSource, Role } from '@prisma/client';
 import { z } from 'zod';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { requireTenantContext, assertRecordInTenant } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { getOrgRestrictionIds } from '../services/orgAccess';
+import {
+  assertEnrollmentAccessFromReq,
+  assertRevalidationEnrollmentAccess
+} from '../services/enrollmentAccess';
 import {
   acknowledgeRevalidation,
   approveRevalidation,
@@ -38,7 +43,7 @@ function audienceFor(req: AuthRequest) {
 enrollmentRouter.get('/revalidations', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const items = await listEnrollmentRevalidations(req.tenantContext!.tenantId!, req.params.id);
     const audience = audienceFor(req);
     res.json({ items: items.map((i) => sanitizeRevalidationForAudience(i, audience)) });
@@ -51,7 +56,7 @@ enrollmentRouter.get('/revalidations', async (req: AuthRequest, res: Response, n
 enrollmentRouter.post('/revalidations', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may create revalidations' });
     }
@@ -91,7 +96,8 @@ rootRouter.get('/dashboard', async (req: AuthRequest, res: Response, next: NextF
     if (req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Not available to external providers' });
     }
-    const data = await getRevalidationDashboardCounts(req.tenantContext!.tenantId!);
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
+    const data = await getRevalidationDashboardCounts(req.tenantContext!.tenantId!, orgIds);
     res.json(data);
   } catch (e: any) {
     if (e?.status) return res.status(e.status).json({ error: e.message, code: e.code });
@@ -105,9 +111,11 @@ rootRouter.get('/worklist', async (req: AuthRequest, res: Response, next: NextFu
     if (req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Not available to external providers' });
     }
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
     const q = req.query;
     const data = await getRevalidationWorklist({
       tenantId: req.tenantContext!.tenantId!,
+      enrollmentOrgIds: orgIds,
       page: q.page ? Number(q.page) : 1,
       pageSize: q.pageSize ? Number(q.pageSize) : 25,
       status: q.status ? String(q.status) : undefined,
@@ -148,6 +156,12 @@ rootRouter.post('/evaluate-overdue', async (req: AuthRequest, res: Response, nex
 rootRouter.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
+    await assertRevalidationEnrollmentAccess(
+      req.user!.id,
+      req.user!.role,
+      req.params.id,
+      req.tenantContext
+    );
     const row = await getRevalidation(req.tenantContext!.tenantId!, req.params.id);
     res.json(sanitizeRevalidationForAudience(row, audienceFor(req)));
   } catch (e: any) {
@@ -162,6 +176,12 @@ rootRouter.get('/:id/history', async (req: AuthRequest, res: Response, next: Nex
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Revalidation history is available to GPA staff only' });
     }
+    await assertRevalidationEnrollmentAccess(
+      req.user!.id,
+      req.user!.role,
+      req.params.id,
+      req.tenantContext
+    );
     const items = await getRevalidationHistory(req.tenantContext!.tenantId!, req.params.id);
     res.json({ items });
   } catch (e: any) {
@@ -177,6 +197,12 @@ function lifecycle(action: string, handler: (req: AuthRequest) => Promise<any>) 
       if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
         return res.status(403).json({ error: 'Only GPA staff may change revalidation status' });
       }
+      await assertRevalidationEnrollmentAccess(
+        req.user!.id,
+        req.user!.role,
+        req.params.id,
+        req.tenantContext
+      );
       const row = await handler(req);
       await audit(req, `revalidation.${action}`, 'enrollmentRevalidations', req.params.id, null, {
         status: row.status

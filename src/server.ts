@@ -4,6 +4,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
+import cookieParser from 'cookie-parser';
 import { ZodError } from 'zod';
 import authRoutes from './routes/auth';
 import dashboardRoutes from './routes/dashboard';
@@ -42,12 +43,21 @@ import {
   revalidationRoutes
 } from './routes/enrollmentRevalidation';
 import credentialingOpsRoutes from './routes/credentialingOps';
-import { authenticate, attachTenantContext } from './middleware/auth';
+import organizationWorkspaceRoutes from './routes/organizationWorkspace';
+import automationRoutes from './routes/automation';
+import { authenticate, attachTenantContext, requireCsrfForCookieAuth } from './middleware/auth';
 import { prisma } from './lib/prisma';
-import { assertSafeRuntimeConfig, isE2eLoginBypassAllowed } from './lib/runtimeSecurity';
+import {
+  assertProductionSecurityIntegrations,
+  assertSafeRuntimeConfig,
+  isE2eLoginBypassAllowed,
+  resolveCorsOrigins
+} from './lib/runtimeSecurity';
+import { startAutomationScheduler, stopAutomationScheduler } from './services/automationScheduler';
 
-// C2 / C3: refuse unsafe production configuration before listening.
+// C2 / C3 / H6 / CORS / storage / scanner: refuse unsafe production configuration before listening.
 assertSafeRuntimeConfig();
+assertProductionSecurityIntegrations();
 
 const app = express();
 app.disable('x-powered-by');
@@ -55,10 +65,11 @@ app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
 app.use(cors({
-  origin: (process.env.WEB_ORIGIN || 'http://localhost:5173,http://localhost:5174').split(',').map(x => x.trim()),
-  credentials: false
+  origin: resolveCorsOrigins(),
+  credentials: true
 }));
 app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 app.use(morgan(process.env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use('/api', rateLimit({ windowMs: 15 * 60 * 1000, limit: 500, standardHeaders: true, legacyHeaders: false }));
 // Dedicated login limiter. E2E may raise/skip limits only in non-production when
@@ -82,7 +93,8 @@ app.get('/health', async (_req, res) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/invitations', invitationsPublicRoutes);
 app.use('/api/provider-invitations', providerInvitationsPublicRoutes);
-const withTenant = [authenticate, attachTenantContext] as const;
+// CSRF runs after authenticate so cookie-vs-bearer authority is known.
+const withTenant = [authenticate, requireCsrfForCookieAuth, attachTenantContext] as const;
 app.use('/api/provider-portal', ...withTenant, providerPortalRoutes);
 app.use('/api/employees', ...withTenant, employeesRoutes);
 app.use('/api/dashboard', ...withTenant, dashboardRoutes);
@@ -110,6 +122,8 @@ app.use('/api/search', ...withTenant, searchRoutes);
 app.use('/api/tasks', ...withTenant, tasksExtraRoutes);
 app.use('/api/clients', ...withTenant, clientsRoutes);
 app.use('/api/portal', ...withTenant, portalRoutes);
+app.use('/api/organizations/:organizationId', ...withTenant, organizationWorkspaceRoutes);
+app.use('/api/automation', ...withTenant, automationRoutes);
 app.use('/api/providers/:providerId/professional-history', ...withTenant, professionalHistoryRoutes);
 app.use('/api/provider-portal/providers/:providerId/professional-history', ...withTenant, professionalHistoryRoutes);
 app.use('/api/provider-licenses', ...withTenant, licensesLifecycleRoutes);
@@ -133,8 +147,24 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   });
 });
 
-const port = Number(process.env.PORT || 4000);
-const server = app.listen(port, () => console.log(`Credentialing API listening on :${port}`));
-const shutdown = async () => { server.close(); await prisma.$disconnect(); process.exit(0); };
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+// Vercel (and other serverless hosts) import this module and invoke `app` directly.
+// Only bind a port when running as a long-lived Node process (local / traditional host).
+export default app;
+
+const isServerlessRuntime = Boolean(process.env.VERCEL) || process.env.SERVERLESS === '1';
+
+if (!isServerlessRuntime) {
+  const port = Number(process.env.PORT || 4000);
+  const server = app.listen(port, () => {
+    console.log(`Credentialing API listening on :${port}`);
+    startAutomationScheduler();
+  });
+  const shutdown = async () => {
+    await stopAutomationScheduler();
+    server.close();
+    await prisma.$disconnect();
+    process.exit(0);
+  };
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}

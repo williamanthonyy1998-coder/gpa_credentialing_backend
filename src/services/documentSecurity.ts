@@ -1,22 +1,21 @@
 import { DocumentSecurityStatus, Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
+import {
+  isMalwareScannerConfigured,
+  runMalwareScan
+} from './malwareScanner';
 
 /**
  * Malware scanner abstraction (Phase 2C / security remediation H1–H4).
  * No scanner is active unless explicitly configured — never pretend otherwise.
  */
-export function isMalwareScannerConfigured(): boolean {
-  return Boolean(
-    process.env.MALWARE_SCANNER_ENABLED === '1'
-    || process.env.MALWARE_SCANNER_URL
-  );
-}
+export { isMalwareScannerConfigured };
 
 export type ScanResult =
   | { scanned: true; status: 'AVAILABLE' | 'REJECTED'; detail?: string }
   | { scanned: false; status: 'QUARANTINED'; reason: string };
 
-export async function scanOrQuarantine(_input: {
+export async function scanOrQuarantine(input: {
   documentId: string;
   filePath: string;
 }): Promise<ScanResult> {
@@ -27,12 +26,62 @@ export async function scanOrQuarantine(_input: {
       reason: 'Malware scanner is not configured. Document remains quarantined until authorized manual release.'
     };
   }
-  // Placeholder for production scanner integration (e.g. HTTP call to MALWARE_SCANNER_URL).
-  // Intentionally not implemented — configuration alone must not imply a working scanner.
+
+  const outcome = await runMalwareScan(input.filePath);
+  if (!outcome.ok) {
+    await prisma.document.update({
+      where: { id: input.documentId },
+      data: {
+        securityStatus: DocumentSecurityStatus.QUARANTINED,
+        malwareScannedAt: null,
+        malwareScanStatus: 'ERROR',
+        malwareScanDetail: String(outcome.error || 'scan_error').slice(0, 500)
+      }
+    }).catch(() => undefined);
+    return {
+      scanned: false,
+      status: 'QUARANTINED',
+      reason: `Scanner error — document remains quarantined (${outcome.engine}).`
+    };
+  }
+
+  if (!outcome.clean) {
+    await prisma.document.update({
+      where: { id: input.documentId },
+      data: {
+        securityStatus: DocumentSecurityStatus.REJECTED,
+        malwareScannedAt: new Date(),
+        malwareScanStatus: 'INFECTED',
+        malwareScanDetail: String(outcome.detail || 'infected').slice(0, 500)
+      }
+    }).catch(() => undefined);
+    return {
+      scanned: true,
+      status: 'REJECTED',
+      detail: outcome.detail || 'infected'
+    };
+  }
+
+  // Clean scan still leaves QUARANTINED until policy release OR auto-release if enabled.
+  const autoRelease = process.env.MALWARE_AUTO_RELEASE_ON_CLEAN === '1';
+  const status = autoRelease ? DocumentSecurityStatus.AVAILABLE : DocumentSecurityStatus.QUARANTINED;
+  await prisma.document.update({
+    where: { id: input.documentId },
+    data: {
+      securityStatus: status,
+      malwareScannedAt: new Date(),
+      malwareScanStatus: 'CLEAN',
+      malwareScanDetail: String(outcome.detail || 'clean').slice(0, 500)
+    }
+  }).catch(() => undefined);
+
+  if (autoRelease) {
+    return { scanned: true, status: 'AVAILABLE', detail: outcome.detail };
+  }
   return {
     scanned: false,
     status: 'QUARANTINED',
-    reason: 'MALWARE_SCANNER_ENABLED is set but no scanner adapter is implemented yet.'
+    reason: 'Scanner reported clean; awaiting authorized release policy (MALWARE_AUTO_RELEASE_ON_CLEAN not enabled).'
   };
 }
 
@@ -42,19 +91,17 @@ export function isTrustedForConversion(status: DocumentSecurityStatus): boolean 
 }
 
 export function canProviderDownload(status: DocumentSecurityStatus): boolean {
-  // Providers may only download their own files after release (AVAILABLE).
   return status === DocumentSecurityStatus.AVAILABLE;
 }
 
 /**
  * H4: Normal download path — only AVAILABLE (trusted) documents.
- * Quarantined/scanning/uploaded/rejected/deleted are never downloadable here.
  */
 export function canNormalDownload(status: DocumentSecurityStatus | string): boolean {
   return status === DocumentSecurityStatus.AVAILABLE || status === 'AVAILABLE';
 }
 
-/** @deprecated Use canNormalDownload — kept name for older call sites during remediation. */
+/** @deprecated Use canNormalDownload */
 export function canStaffReviewDownload(status: DocumentSecurityStatus, _role: string): boolean {
   return canNormalDownload(status);
 }
@@ -133,6 +180,7 @@ export async function rejectDocument(documentId: string, actorId: string, reason
 /**
  * H3: Authorized manual release — not a malware scan pass.
  * Requires meaningful reason; records previous→new status.
+ * Never sets malwareScanned=true.
  */
 export async function releaseDocumentFromQuarantine(input: {
   documentId: string;

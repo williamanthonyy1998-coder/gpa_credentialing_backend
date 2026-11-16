@@ -82,13 +82,15 @@ export async function loadEnrollmentForAccess(
     }
   });
   if (!row) denyNotFound();
+  // RT-06: empty allow-list is deny-all for clients; unrestricted staff have full tenant org set.
   const orgIds = await getAuthorizedOrganizationIds(userId, role, tenantCtx);
   const orgId = row.organizationId
     || row.practice?.organizationId
     || row.facility?.organizationId
     || row.facility?.practice?.organizationId
     || null;
-  if (orgId && orgIds.length && !orgIds.includes(orgId)) denyNotFound();
+  if (!orgIds.length) denyNotFound();
+  if (!orgId || !orgIds.includes(orgId)) denyNotFound();
   return row;
 }
 

@@ -6,10 +6,13 @@ import { AuthRequest, allowRoles } from '../middleware/auth';
 import { Role } from '@prisma/client';
 import { assertCaseTransition, assertEnrollmentTransition, allowedCaseTransitions, daysConsumed } from '../services/workflow';
 import {
+  assertOrganizationAccess,
   assertResourceRecordAccess,
   getOrgRestrictionIds,
   orgListWhereForResource
 } from '../services/orgAccess';
+import { sanitizeDocumentForAudience, stripClientWritableFileFields } from '../services/documentAudience';
+import { encryptSensitiveFieldsInPlace } from '../lib/fieldCrypto';
 import { profileCompletion } from '../services/profileCompletion';
 import { notifyUser } from '../services/notifications';
 import { generateApplicationNo } from '../services/enrollments';
@@ -64,27 +67,27 @@ function assertCanModify(req: AuthRequest) {
 }
 function sanitizeRow(row: any, role: Role, resource: string) {
   if (!row) return row;
-  if (role === Role.ADMIN) return row;
-  const copy = { ...row };
-  if (resource === 'providers' && role !== Role.CREDENTIALING_MANAGER) delete copy.ssn;
+  let copy = { ...row };
+  if (resource === 'documents') {
+    copy = sanitizeDocumentForAudience(copy, role) as any;
+  }
+  if (role === Role.ADMIN && resource !== 'documents') return row;
+  if (resource === 'providers' && role !== Role.ADMIN && role !== Role.CREDENTIALING_MANAGER) delete copy.ssn;
   if (resource === 'organizations') {
     delete copy.bankAccountNumber;
     delete copy.bankRoutingNumber;
-    if (role !== Role.CREDENTIALING_MANAGER) delete copy.taxId;
+    if (role !== Role.ADMIN && role !== Role.CREDENTIALING_MANAGER) delete copy.taxId;
   }
   if (resource === 'practices') {
     delete copy.bankAccountNumber;
     delete copy.bankRoutingNumber;
-    if (role !== Role.CREDENTIALING_MANAGER) delete copy.taxId;
+    if (role !== Role.ADMIN && role !== Role.CREDENTIALING_MANAGER) delete copy.taxId;
   }
-  if (resource === 'documents' && role !== Role.CREDENTIALING_MANAGER) {
+  if (resource === 'documents' && role !== Role.ADMIN && role !== Role.CREDENTIALING_MANAGER) {
     if (copy.bankRoutingNumber) {
       const digits = String(copy.bankRoutingNumber).replace(/\D/g, '');
       copy.bankRoutingNumber = digits.length >= 4 ? `••••${digits.slice(-4)}` : '[REDACTED]';
     }
-  }
-  if (resource === 'documents' && (role === Role.CLIENT_USER || role === Role.EXTERNAL_PROVIDER)) {
-    delete copy.notes;
   }
   if (resource === 'licenses' && (role === Role.CLIENT_USER || role === Role.EXTERNAL_PROVIDER || role === Role.READ_ONLY || role === Role.AUDITOR)) {
     if (copy.number) {
@@ -126,7 +129,7 @@ const schemas: Record<string, z.ZodTypeAny> = {
   providers: z.object({ firstName: z.string().min(1), middleName: z.string().optional().nullable(), lastName: z.string().min(1), npi: z.string().optional().nullable(), dateOfBirth: z.coerce.date().optional().nullable(), placeOfBirth: z.string().optional().nullable(), ssn: z.string().optional().nullable(), citizenship: z.string().optional().nullable(), gender: z.string().optional().nullable(), email: z.string().email().optional().or(z.literal('')).nullable(), homePhone: z.string().optional().nullable(), workPhone: z.string().optional().nullable(), address: z.any().optional(), primarySpecialty: z.string().optional().nullable(), secondarySpecialty: z.string().optional().nullable(), primarySpecialtyId: z.string().optional().nullable(), secondarySpecialtyId: z.string().optional().nullable(), taxonomyCode: z.string().optional().nullable(), professionalType: z.string().optional().nullable(), supervisorName: z.string().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   providerOrganizations: z.object({ providerId: z.string().min(1), organizationId: z.string().min(1), affiliationTitle: z.string().optional().nullable(), effectiveAt: z.coerce.date().optional().nullable(), endAt: z.coerce.date().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   licenses: z.object({ providerId: z.string().min(1), type: z.string().min(1).optional(), licenseTypeId: z.string().optional().nullable(), number: z.string().optional().nullable(), state: z.string().optional().nullable(), usStateId: z.string().optional().nullable(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), issuingBody: z.string().optional().nullable(), notes: z.string().optional().nullable() }).refine((v) => Boolean(v.type || v.licenseTypeId), { message: 'License type is required', path: ['type'] }),
-  documents: z.object({ title: z.string().min(1), type: z.string().min(1), category: z.string().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), storageKey: z.string().optional().nullable(), originalName: z.string().optional().nullable(), mimeType: z.string().optional().nullable(), sizeBytes: z.number().int().nonnegative().optional().nullable(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), verifiedAt: z.coerce.date().optional().nullable(), verifiedBy: z.string().optional().nullable(), notes: z.string().optional().nullable(), ignored: z.boolean().optional(), required: z.boolean().optional(), reportingRequired: z.boolean().optional(), warningDays: z.coerce.number().int().positive().optional().nullable(), policyNumber: z.string().optional().nullable(), perOccurrence: z.coerce.number().nonnegative().optional().nullable(), aggregate: z.coerce.number().nonnegative().optional().nullable(), insuranceCompany: z.string().optional().nullable(), namedInsured: z.string().optional().nullable(), bankName: z.string().optional().nullable(), bankTitle: z.string().optional().nullable(), bankRoutingNumber: z.string().optional().nullable(), bankAccountType: z.enum(['Checking','Savings','Other']).optional().nullable(), bankPhoneNumber: z.string().optional().nullable(), bankAccountHolder: z.string().optional().nullable(), providerId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), facilityId: z.string().optional().nullable() }),
+  documents: z.object({ title: z.string().min(1), type: z.string().min(1), category: z.string().optional().nullable(), status: z.enum(['MISSING','RECEIVED','UNDER_REVIEW','VERIFIED','REJECTED','EXPIRED']).optional(), issuedAt: z.coerce.date().optional().nullable(), expiresAt: z.coerce.date().optional().nullable(), verifiedAt: z.coerce.date().optional().nullable(), verifiedBy: z.string().optional().nullable(), notes: z.string().optional().nullable(), ignored: z.boolean().optional(), required: z.boolean().optional(), reportingRequired: z.boolean().optional(), warningDays: z.coerce.number().int().positive().optional().nullable(), policyNumber: z.string().optional().nullable(), perOccurrence: z.coerce.number().nonnegative().optional().nullable(), aggregate: z.coerce.number().nonnegative().optional().nullable(), insuranceCompany: z.string().optional().nullable(), namedInsured: z.string().optional().nullable(), bankName: z.string().optional().nullable(), bankTitle: z.string().optional().nullable(), bankRoutingNumber: z.string().optional().nullable(), bankAccountType: z.enum(['Checking','Savings','Other']).optional().nullable(), bankPhoneNumber: z.string().optional().nullable(), bankAccountHolder: z.string().optional().nullable(), providerId: z.string().optional().nullable(), organizationId: z.string().optional().nullable(), practiceId: z.string().optional().nullable(), facilityId: z.string().optional().nullable() }),
   cases: z.object({ caseNumber: z.string().min(1), providerId: z.string().min(1), practiceId: z.string().optional().nullable(), status: z.enum(['DRAFT','INFORMATION_NEEDED','UNDER_REVIEW','VERIFICATION_PENDING','READY_FOR_APPROVAL','APPROVED','REJECTED','ON_HOLD']).optional(), assignedTo: z.string().optional().nullable(), dueAt: z.coerce.date().optional().nullable(), submittedAt: z.coerce.date().optional().nullable(), decisionAt: z.coerce.date().optional().nullable(), decisionBy: z.string().optional().nullable(), decisionReason: z.string().optional().nullable(), checklist: z.any().optional(), notes: z.string().optional().nullable() }),
   payers: z.object({ name: z.string().min(2), legalName: z.string().optional().nullable(), payerCode: z.string().optional().nullable(), payerType: z.string().optional().nullable(), website: z.string().optional().nullable(), phone: z.string().optional().nullable(), fax: z.string().optional().nullable(), email: z.string().email().optional().or(z.literal('')).nullable(), address: z.any().optional(), notes: z.string().optional().nullable(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional() }),
   plans: z.object({ payerId: z.string().min(1), name: z.string().min(1), planCode: z.string().optional().nullable(), planType: z.string().optional().nullable(), stateApplicability: z.string().optional().nullable(), metadata: z.any().optional(), status: z.enum(['ACTIVE','INACTIVE','PENDING','ARCHIVED']).optional(), checklist: z.any().optional() }),
@@ -329,8 +332,9 @@ router.post('/:resource', async (req: AuthRequest, res: Response, next: NextFunc
       return res.status(403).json({ error: 'Client users cannot modify platform reference data' });
     }
     const tenantId = requireTenantForResource(req, resource);
-    const data = cleanData(schema.parse(req.body));
+    let data = cleanData(schema.parse(req.body));
     if ('tenantId' in data) delete data.tenantId;
+    if (resource === 'documents') data = stripClientWritableFileFields(data);
     if (resource === 'organizations' && tenantId) data.tenantId = tenantId;
     if (resource === 'facilities') {
       if (!data.practiceId && !data.organizationId) return res.status(400).json({ error: 'Select an organization or practice for this facility' });
@@ -358,6 +362,9 @@ router.post('/:resource', async (req: AuthRequest, res: Response, next: NextFunc
         enrollmentId: data.enrollmentId,
         caseId: data.caseId
       });
+      if (data.organizationId) {
+        await assertOrganizationAccess(req.user!.id, req.user!.role, data.organizationId, req.tenantContext);
+      }
     }
     if (['documents', 'cases', 'tasks'].includes(resource) && tenantId) data.tenantId = tenantId;
     if (('ssn' in data || 'bankAccountNumber' in data || 'bankRoutingNumber' in data) && !([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify sensitive identifiers or banking details' });
@@ -397,6 +404,10 @@ router.post('/:resource', async (req: AuthRequest, res: Response, next: NextFunc
     if (resource === 'documents' && data.category) {
       await assertCredentialCategoryCodeAssignable(String(data.category), tenantId, { forCreate: true });
     }
+    if (['providers', 'organizations', 'practices', 'documents', 'billingEntities'].includes(resource)
+      || resource === 'practiceOwners') {
+      data = encryptSensitiveFieldsInPlace(data);
+    }
     const row = await model.create({ data, include: includes[resource] });
     if (resource === 'providers' && tenantId) await ensureTenantProvider(tenantId, row.id);
     if (resource === 'providers') {
@@ -417,8 +428,9 @@ router.patch('/:resource/:id', async (req: AuthRequest, res: Response, next: Nex
       return res.status(403).json({ error: 'Client users cannot modify platform reference data' });
     }
     const tenantId = requireTenantForResource(req, resource);
-    const data = cleanData((schema as z.AnyZodObject).partial().parse(req.body));
+    let data = cleanData((schema as z.AnyZodObject).partial().parse(req.body));
     if ('tenantId' in data) delete data.tenantId;
+    if (resource === 'documents') data = stripClientWritableFileFields(data);
     if (resource === 'enrollments') delete data.applicationNo;
     if (resource === 'facilities' || resource === 'enrollments') {
       const existing = await model.findUnique({ where: { id: req.params.id } }); if (!existing) return res.status(404).json({ error: 'Record not found' }); const merged = { ...existing, ...data };
@@ -491,6 +503,10 @@ router.patch('/:resource/:id', async (req: AuthRequest, res: Response, next: Nex
     }
     if (resource === 'documents' && data.category) {
       await assertCredentialCategoryCodeAssignable(String(data.category), tenantId, { forCreate: true });
+    }
+    if (['providers', 'organizations', 'practices', 'documents', 'billingEntities'].includes(resource)
+      || resource === 'practiceOwners') {
+      data = encryptSensitiveFieldsInPlace(data);
     }
     const row = await model.update({ where: { id: req.params.id }, data, include: includes[resource] });
     if (resource === 'providers' && ('primarySpecialtyId' in data || 'secondarySpecialtyId' in data || 'primarySpecialty' in data || 'secondarySpecialty' in data)) {

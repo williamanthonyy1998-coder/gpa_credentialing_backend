@@ -5,14 +5,15 @@ import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
 import { notifyUser } from '../services/notifications';
-import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertResourceRecordAccess } from '../services/orgAccess';
 
 const router = Router();
 
 router.get('/:id/comments', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'tasks', req.params.id);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'tasks', req.params.id, req.tenantContext);
     const task = await prisma.task.findUnique({ where: { id: req.params.id }, select: { id: true } });
     if (!task) return res.status(404).json({ error: 'Task not found' });
     const comments = await prisma.taskComment.findMany({
@@ -31,7 +32,7 @@ router.post('/:id/comments', async (req: AuthRequest, res: Response, next: NextF
     }
     const input = z.object({ body: z.string().min(1).max(4000) }).parse(req.body);
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'tasks', req.params.id);
+    await assertResourceRecordAccess(req.user!.id, req.user!.role, 'tasks', req.params.id, req.tenantContext);
     const task = await prisma.task.findUnique({
       where: { id: req.params.id },
       include: { assignedTo: { select: { id: true } }, createdBy: { select: { id: true } } }

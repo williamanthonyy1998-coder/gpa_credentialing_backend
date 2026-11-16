@@ -3,7 +3,8 @@ import { Role } from '@prisma/client';
 import { z } from 'zod';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertEnrollmentAccessFromReq } from '../services/enrollmentAccess';
 import {
   attachPacketEvidence,
   evaluateEnrollmentPacket,
@@ -26,7 +27,7 @@ function audienceFor(req: AuthRequest) {
 router.get('/packet', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const packet = await getLatestPacket(req.tenantContext!.tenantId!, req.params.id);
     if (!packet) return res.json({ packet: null, note: 'No packet evaluated yet' });
     res.json({
@@ -42,7 +43,7 @@ router.get('/packet', async (req: AuthRequest, res: Response, next: NextFunction
 router.get('/packet/history', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const items = await listPacketHistory(req.tenantContext!.tenantId!, req.params.id);
     const audience = audienceFor(req);
     res.json({
@@ -57,7 +58,7 @@ router.get('/packet/history', async (req: AuthRequest, res: Response, next: Next
 router.get('/packet/requirements', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const packet = await getLatestPacket(req.tenantContext!.tenantId!, req.params.id);
     if (!packet) return res.json({ items: [] });
     const sanitized = sanitizePacketForAudience(packet, audienceFor(req));
@@ -71,7 +72,7 @@ router.get('/packet/requirements', async (req: AuthRequest, res: Response, next:
 router.post('/packet/evaluate', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'External providers cannot evaluate enrollment packets' });
     }
@@ -107,7 +108,7 @@ router.post('/packet/evaluate', async (req: AuthRequest, res: Response, next: Ne
 router.post('/packet/requirements/:requirementId/evidence', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({ documentId: z.string().min(1) }).parse(req.body || {});
     const item = await attachPacketEvidence({
       tenantId: req.tenantContext!.tenantId!,
@@ -131,7 +132,7 @@ router.post('/packet/requirements/:requirementId/evidence', async (req: AuthRequ
 router.post('/packet/requirements/:requirementId/review', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Clients and providers cannot verify or reject packet requirements' });
     }
@@ -163,7 +164,7 @@ router.post('/packet/requirements/:requirementId/review', async (req: AuthReques
 router.post('/packet/requirements/:requirementId/request-correction', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({ reason: z.string().min(1).max(4000) }).parse(req.body || {});
     const item = await reviewPacketItem({
       tenantId: req.tenantContext!.tenantId!,
@@ -185,7 +186,7 @@ router.post('/packet/requirements/:requirementId/request-correction', async (req
 router.post('/packet/requirements/:requirementId/waive', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Clients and providers cannot waive requirements' });
     }

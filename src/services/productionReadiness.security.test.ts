@@ -184,5 +184,10 @@ test('C2 assertSafeRuntimeConfig refuses production E2E_SAFE_DATABASE', () => {
     () => assertSafeRuntimeConfig({ NODE_ENV: 'production', E2E_SAFE_DATABASE: '1' }),
     /E2E_SAFE_DATABASE/
   );
-  assert.doesNotThrow(() => assertSafeRuntimeConfig({ NODE_ENV: 'production' }));
+  assert.doesNotThrow(() => assertSafeRuntimeConfig({
+    NODE_ENV: 'production',
+    FIELD_ENCRYPTION_KEY: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    WEB_ORIGIN: 'https://app.example.com',
+    DATABASE_URL: 'postgresql://u:p@localhost:5432/credentialing_prod'
+  }));
 });

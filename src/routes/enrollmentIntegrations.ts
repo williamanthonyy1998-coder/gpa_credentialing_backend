@@ -3,7 +3,8 @@ import { Role } from '@prisma/client';
 import { z } from 'zod';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { requireTenantContext, assertRecordInTenant } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertEnrollmentAccessFromReq } from '../services/enrollmentAccess';
 import { recordManualIntegrationAction } from '../services/externalIntegrations';
 
 const router = Router({ mergeParams: true });
@@ -11,7 +12,7 @@ const router = Router({ mergeParams: true });
 router.post('/integrations/manual-action', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     if (req.user!.role === Role.CLIENT_USER || req.user!.role === Role.EXTERNAL_PROVIDER) {
       return res.status(403).json({ error: 'Only GPA staff may record manual integration actions' });
     }

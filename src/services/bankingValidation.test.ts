@@ -73,7 +73,7 @@ test('banking extraction does not invent routing from invalid digits', () => {
 test('field encryption round-trip and masking', () => {
   process.env.FIELD_ENCRYPTION_KEY = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
   const enc = encryptField('021000021');
-  assert.ok(enc && enc.startsWith('enc:v1:'));
+  assert.ok(enc && (enc.startsWith('enc:v2:') || enc.startsWith('enc:v1:')));
   assert.equal(decryptField(enc), '021000021');
   assert.equal(maskLast4('021000021'), '••••0021');
 });

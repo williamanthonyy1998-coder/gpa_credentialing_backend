@@ -807,33 +807,8 @@ export async function cancelFollowUp(input: {
   return updated;
 }
 
-/** When enrollment becomes terminal, cancel open follow-ups with audit (no delete). */
-export async function cancelOpenFollowUpsForTerminal(input: {
-  tenantId: string;
-  enrollmentId: string;
-  actorId: string;
-  reason: string;
-}) {
-  const open = await prisma.task.findMany({
-    where: {
-      tenantId: input.tenantId,
-      enrollmentId: input.enrollmentId,
-      source: ENROLLMENT_FOLLOWUP_SOURCE,
-      status: { in: [TaskStatus.OPEN, TaskStatus.IN_PROGRESS, TaskStatus.BLOCKED] }
-    }
-  });
-  for (const task of open) {
-    await prisma.task.update({
-      where: { id: task.id },
-      data: {
-        status: TaskStatus.CANCELLED,
-        completedAt: new Date(),
-        completionNotes: input.reason
-      }
-    });
-  }
-  return { cancelled: open.length };
-}
+/** When enrollment becomes terminal, cancel open follow-ups with audit (no delete). Phase 5C: delegates to lifecycle. */
+export { cancelOpenFollowUpsForTerminal } from './enrollmentLifecycle';
 
 export async function getSubmissionDashboardExtras(tenantId: string) {
   const now = new Date();

@@ -7,23 +7,69 @@ import {
   TenantAuthContext,
   resolveTenantAuthContext
 } from '../services/tenantAccess';
+import { assertSessionActive } from '../services/authSession';
+import {
+  CSRF_COOKIE,
+  CSRF_HEADER,
+  SESSION_COOKIE,
+  timingSafeEqualString
+} from '../lib/sessionCookies';
 
 export interface AuthRequest extends Request {
-  user?: { id: string; email: string; role: Role };
+  user?: { id: string; email: string; role: Role; jti?: string };
   tenantContext?: TenantAuthContext;
+  /** True when the request authenticated via session cookie (CSRF required for mutations). */
+  authViaCookie?: boolean;
 }
 
-export function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
+function extractBearer(req: Request): string | null {
   const header = req.headers.authorization;
-  if (!header?.startsWith('Bearer ')) return res.status(401).json({ error: 'Authentication required' });
+  if (header?.startsWith('Bearer ')) return header.slice(7).trim() || null;
+  return null;
+}
+
+function extractCookieToken(req: Request): string | null {
+  const cookies = (req as any).cookies as Record<string, string> | undefined;
+  const fromCookie = cookies?.[SESSION_COOKIE];
+  if (fromCookie && String(fromCookie).trim()) return String(fromCookie).trim();
+  return null;
+}
+
+export async function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
+  const bearer = extractBearer(req);
+  const cookieToken = extractCookieToken(req);
+  const token = bearer || cookieToken;
+  if (!token) return res.status(401).json({ error: 'Authentication required' });
   try {
     const secret = process.env.JWT_SECRET;
-    if (!secret || secret.length < 32) return res.status(500).json({ error: 'Server authentication configuration is invalid' });
-    req.user = jwt.verify(header.slice(7), secret) as AuthRequest['user'];
+    if (!secret || secret.length < 32) {
+      return res.status(500).json({ error: 'Server authentication configuration is invalid' });
+    }
+    const payload = jwt.verify(token, secret) as AuthRequest['user'] & { jti?: string };
+    await assertSessionActive(payload?.jti);
+    req.user = { id: payload!.id, email: payload!.email, role: payload!.role, jti: payload?.jti };
+    req.authViaCookie = Boolean(cookieToken) && !bearer;
     next();
-  } catch {
+  } catch (err: any) {
+    if (err?.status === 401) return res.status(401).json({ error: err.message || 'Invalid or expired session' });
     return res.status(401).json({ error: 'Invalid or expired session' });
   }
+}
+
+/**
+ * CSRF guard for cookie-authenticated state-changing requests.
+ * Bearer-token API clients are exempt (no ambient cookie authority).
+ */
+export function requireCsrfForCookieAuth(req: AuthRequest, res: Response, next: NextFunction) {
+  const method = String(req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return next();
+  if (!req.authViaCookie) return next();
+  const headerToken = String(req.headers[CSRF_HEADER] || '').trim();
+  const cookieToken = String((req as any).cookies?.[CSRF_COOKIE] || '').trim();
+  if (!headerToken || !cookieToken || !timingSafeEqualString(headerToken, cookieToken)) {
+    return res.status(403).json({ error: 'CSRF validation failed', code: 'CSRF_FAILED' });
+  }
+  next();
 }
 
 /**
@@ -33,9 +79,6 @@ export function authenticate(req: AuthRequest, res: Response, next: NextFunction
 export async function attachTenantContext(req: AuthRequest, res: Response, next: NextFunction) {
   try {
     if (!req.user) return res.status(401).json({ error: 'Authentication required' });
-    // Only the dedicated header may select tenant context. Query/body tenantId
-    // values are ignored for authorization so clients cannot switch tenants by
-    // mutating URL params or payloads. Membership is always revalidated in DB.
     const requestedTenantId = (req.headers[TENANT_HEADER] as string | undefined) || null;
     req.tenantContext = await resolveTenantAuthContext({
       userId: req.user.id,

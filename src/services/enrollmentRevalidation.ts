@@ -25,6 +25,30 @@ export const REVALIDATION_TYPES = [
   'OTHER'
 ] as const;
 
+/** RT-06: optional enrollment org ACL scope for dashboard/worklist (null = unrestricted). */
+export function revalidationEnrollmentOrgWhere(enrollmentOrgIds: string[] | null | undefined) {
+  if (enrollmentOrgIds === undefined || enrollmentOrgIds === null) return {};
+  if (!enrollmentOrgIds.length) return { id: '__none__' };
+  return {
+    enrollment: {
+      OR: [
+        { organizationId: { in: enrollmentOrgIds } },
+        { practice: { is: { organizationId: { in: enrollmentOrgIds } } } },
+        {
+          facility: {
+            is: {
+              OR: [
+                { organizationId: { in: enrollmentOrgIds } },
+                { practice: { is: { organizationId: { in: enrollmentOrgIds } } } }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  };
+}
+
 export const ACTIVE_REVALIDATION: EnrollmentRevalidationStatus[] = [
   EnrollmentRevalidationStatus.NOT_STARTED,
   EnrollmentRevalidationStatus.UPCOMING,
@@ -519,10 +543,11 @@ export async function cancelRevalidation(input: {
   });
 }
 
-export async function getRevalidationDashboardCounts(tenantId: string) {
+export async function getRevalidationDashboardCounts(tenantId: string, enrollmentOrgIds?: string[] | null) {
   const now = new Date();
   const in30 = new Date(now.getTime() + 30 * 86400000);
-  const base = { tenantId, status: { notIn: TERMINAL_REVALIDATION } };
+  const orgScope = revalidationEnrollmentOrgWhere(enrollmentOrgIds);
+  const base = { tenantId, status: { notIn: TERMINAL_REVALIDATION }, ...orgScope };
 
   const [
     upcomingTotal,
@@ -537,11 +562,12 @@ export async function getRevalidationDashboardCounts(tenantId: string) {
   ] = await Promise.all([
     prisma.enrollmentRevalidation.count({ where: { ...base } }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: { in: ACTIVE_REVALIDATION }, dueDate: { gte: now, lte: in30 } }
+      where: { tenantId, ...orgScope, status: { in: ACTIVE_REVALIDATION }, dueDate: { gte: now, lte: in30 } }
     }),
     prisma.enrollmentRevalidation.count({
       where: {
         tenantId,
+        ...orgScope,
         OR: [
           { status: EnrollmentRevalidationStatus.OVERDUE },
           { status: { in: ACTIVE_REVALIDATION }, dueDate: { lt: startOfUtcDay(now) } }
@@ -549,14 +575,15 @@ export async function getRevalidationDashboardCounts(tenantId: string) {
       }
     }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: { in: [EnrollmentRevalidationStatus.PREPARING, EnrollmentRevalidationStatus.READY_FOR_INTERNAL_REVIEW] } }
+      where: { tenantId, ...orgScope, status: { in: [EnrollmentRevalidationStatus.PREPARING, EnrollmentRevalidationStatus.READY_FOR_INTERNAL_REVIEW] } }
     }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: EnrollmentRevalidationStatus.READY_FOR_INTERNAL_REVIEW }
+      where: { tenantId, ...orgScope, status: EnrollmentRevalidationStatus.READY_FOR_INTERNAL_REVIEW }
     }),
     prisma.enrollmentRevalidation.count({
       where: {
         tenantId,
+        ...orgScope,
         status: {
           in: [
             EnrollmentRevalidationStatus.SUBMITTED,
@@ -567,13 +594,13 @@ export async function getRevalidationDashboardCounts(tenantId: string) {
       }
     }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: EnrollmentRevalidationStatus.ADDITIONAL_INFORMATION_REQUIRED }
+      where: { tenantId, ...orgScope, status: EnrollmentRevalidationStatus.ADDITIONAL_INFORMATION_REQUIRED }
     }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: EnrollmentRevalidationStatus.COMPLETED }
+      where: { tenantId, ...orgScope, status: EnrollmentRevalidationStatus.COMPLETED }
     }),
     prisma.enrollmentRevalidation.count({
-      where: { tenantId, status: EnrollmentRevalidationStatus.DENIED }
+      where: { tenantId, ...orgScope, status: EnrollmentRevalidationStatus.DENIED }
     })
   ]);
 
@@ -592,6 +619,7 @@ export async function getRevalidationDashboardCounts(tenantId: string) {
 
 export async function getRevalidationWorklist(input: {
   tenantId: string;
+  enrollmentOrgIds?: string[] | null;
   page?: number;
   pageSize?: number;
   status?: string;
@@ -605,7 +633,7 @@ export async function getRevalidationWorklist(input: {
 }) {
   const page = Math.max(1, input.page || 1);
   const pageSize = Math.min(100, Math.max(1, input.pageSize || 25));
-  const where: any = { tenantId: input.tenantId };
+  const where: any = { tenantId: input.tenantId, ...revalidationEnrollmentOrgWhere(input.enrollmentOrgIds) };
   if (input.status) where.status = input.status;
   if (input.payerId) where.payerId = input.payerId;
   if (input.providerId) where.providerId = input.providerId;

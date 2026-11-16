@@ -384,7 +384,8 @@ export async function assertRecordInTenant(ctx: TenantAuthContext, resource: str
       select: { tenantId: true, providerId: true }
     });
     if (!lic) denyNotFound();
-    if (lic.tenantId && lic.tenantId !== ctx.tenantId) denyNotFound();
+    // RT-03: null / mismatched tenantId is unproven ownership → deny.
+    if (!lic.tenantId || lic.tenantId !== ctx.tenantId) denyNotFound();
     const link = await prisma.tenantProvider.findUnique({
       where: { tenantId_providerId: { tenantId: ctx.tenantId!, providerId: lic.providerId } }
     });
@@ -414,7 +415,14 @@ export function listWhereForResource(resource: string, tenantId: string): Record
     case 'providerOrganizations':
       return { organization: { is: { tenantId } } };
     case 'licenses':
-      return { provider: { is: providerInTenantWhere(tenantId) } };
+      // RT-03: require explicit License.tenantId match. Legacy null tenantId licenses
+      // are not visible across tenants (ownership unproven → deny from lists).
+      return {
+        AND: [
+          { tenantId },
+          { provider: { is: providerInTenantWhere(tenantId) } }
+        ]
+      };
     case 'documents':
       return {
         OR: [

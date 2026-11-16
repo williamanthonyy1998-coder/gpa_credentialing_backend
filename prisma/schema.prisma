@@ -1,5 +1,7 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // native = local/dev; rhel-openssl-3.0.x = Vercel Node serverless runtime
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
 }
 
 datasource db {
@@ -149,12 +151,15 @@ model User {
   manager      User?    @relation("EmployeeManager", fields: [managerId], references: [id], onDelete: SetNull)
   directReports User[]  @relation("EmployeeManager")
   organizations UserOrganization[]
+  organizationEmployeeAssignments OrganizationEmployee[] @relation("OrganizationEmployeeAssignments")
+  organizationPayerContacts OrganizationPayer[] @relation("OrganizationPayerContact")
   tenantMemberships TenantMembership[]
   leaveRequests LeaveRequest[] @relation("LeaveApplicant")
   leaveReviews  LeaveRequest[] @relation("LeaveReviewer")
   leaveBalances LeaveBalance[]
   attendance    AttendanceRecord[]
   notifications Notification[]
+  notificationPreferences NotificationPreference[]
   taskComments  TaskComment[]
   intakeAssigned IntakeRequest[] @relation("IntakeAssignee")
   intakeCreated  IntakeRequest[] @relation("IntakeCreator")
@@ -186,6 +191,36 @@ model User {
   revalidationsAssigned EnrollmentRevalidation[] @relation("RevalidationAssignee")
   revalidationsCreated EnrollmentRevalidation[] @relation("RevalidationCreator")
   revalidationEvents EnrollmentRevalidationEvent[] @relation("RevalidationEventActor")
+  passwordResetTokens PasswordResetToken[]
+  authSessions        AuthSession[]
+}
+
+/// Self-service password reset — store only token hashes (SEC-18).
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+  @@index([userId, createdAt])
+  @@index([expiresAt])
+}
+
+/// Server-side session registry for cookie JWT jti revocation (H7).
+model AuthSession {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jti       String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+  ipAddress String?
+  userAgent String?
+  @@index([userId, revokedAt])
+  @@index([expiresAt])
 }
 
 /// Independent client account on the GPA platform. Distinct from Organization
@@ -240,6 +275,11 @@ model Tenant {
   licenses                      License[]
   profileReviews                ProviderProfileReview[]
   credentialingQaScans          CredentialingQaScan[]
+  automationPolicies            AutomationPolicy[]
+  automationJobRuns             AutomationJobRun[]
+  workflowSlaRecords            WorkflowSlaRecord[]
+  escalationRecords             EscalationRecord[]
+  automationAlerts              AutomationAlert[]
   @@index([status])
   @@index([onboardingStatus])
 }
@@ -344,6 +384,67 @@ model UserOrganization {
   @@index([organizationId])
 }
 
+/// Phase 5A: HR assignment of an existing User to an organization.
+/// Distinct from UserOrganization (authorization ACL). HR assignment never grants portal access.
+enum OrganizationEmploymentStatus {
+  ACTIVE
+  INACTIVE
+  PENDING
+  TERMINATED
+}
+
+model OrganizationEmployee {
+  id               String   @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User     @relation("OrganizationEmployeeAssignments", fields: [userId], references: [id], onDelete: Cascade)
+  department       String?
+  jobTitle         String?
+  employmentStatus OrganizationEmploymentStatus @default(ACTIVE)
+  responsibilities String?
+  effectiveFrom    DateTime?
+  effectiveTo      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  @@unique([organizationId, userId])
+  @@index([organizationId, employmentStatus])
+  @@index([userId])
+}
+
+/// Phase 5A: Organization participation / contract relationship with a master Payer.
+enum OrganizationPayerParticipationStatus {
+  NOT_CONTRACTED
+  CONTRACTING
+  CONTRACTED
+  ACTIVE
+  SUSPENDED
+  TERMINATED
+  PENDING_RENEWAL
+}
+
+model OrganizationPayer {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  organization         Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  payerId              String
+  payer                Payer    @relation(fields: [payerId], references: [id], onDelete: Restrict)
+  participationStatus  OrganizationPayerParticipationStatus @default(CONTRACTING)
+  contractReference    String?
+  effectiveDate        DateTime?
+  terminationDate      DateTime?
+  renewalDate          DateTime?
+  assignedContactId    String?
+  assignedContact      User?    @relation("OrganizationPayerContact", fields: [assignedContactId], references: [id], onDelete: SetNull)
+  notes                String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+  @@unique([organizationId, payerId])
+  @@index([organizationId, participationStatus])
+  @@index([payerId])
+  @@index([renewalDate])
+}
+
 model Organization {
   id             String   @id @default(cuid())
   /// Optional until Phase 0B tenant assignment/isolation. Null = unassigned legacy row.
@@ -377,9 +478,15 @@ model Organization {
   documents      Document[]
   auditEvents    AuditEvent[]
   members        UserOrganization[]
+  employees      OrganizationEmployee[]
+  payerParticipations OrganizationPayer[]
   tasks          Task[]
   intakeRequests IntakeRequest[]
   billingEntities BillingEntity[]
+  automationPolicies AutomationPolicy[]
+  workflowSlaRecords WorkflowSlaRecord[]
+  escalationRecords EscalationRecord[]
+  automationAlerts AutomationAlert[]
   @@index([tenantId])
   @@index([tenantId, status])
 }
@@ -668,6 +775,10 @@ model Document {
   /// New uploads default QUARANTINED until scanner or authorized manual release.
   /// Legacy AVAILABLE rows are preserved; do not bulk-migrate without an approved plan.
   securityStatus DocumentSecurityStatus @default(QUARANTINED)
+  /// Set only when an actual scanner adapter returned a conclusive result.
+  malwareScannedAt   DateTime?
+  malwareScanStatus  String?
+  malwareScanDetail  String?
   storageKey     String?
   originalName   String?
   mimeType       String?
@@ -815,6 +926,8 @@ model Payer {
   contacts    PayerContact[]
   requirements PayerRequirement[]
   revalidations EnrollmentRevalidation[]
+  organizationParticipations OrganizationPayer[]
+  automationPolicies AutomationPolicy[]
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
   @@unique([name, payerCode])
@@ -876,6 +989,10 @@ model EnrollmentApplication {
   referenceNo   String?
   lastFollowUpAt DateTime?
   nextFollowUpAt DateTime?
+  /// Phase 5B — automated follow-up counters/status (does not replace Task follow-ups).
+  followUpCount Int @default(0)
+  /// ACTIVE | PAUSED | COMPLETED | CANCELLED | null (unset)
+  followUpStatus String?
   effectiveAt   DateTime?
   revalidationAt DateTime?
   decisionAt    DateTime?
@@ -1013,6 +1130,7 @@ model Task {
   communicationId String?
   communication  EnrollmentCommunication? @relation(fields: [communicationId], references: [id], onDelete: SetNull)
   comments       TaskComment[]
+  assignmentEvents TaskAssignmentEvent[]
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
   @@unique([tenantId, fingerprint])
@@ -1037,6 +1155,21 @@ model TaskComment {
   body      String
   createdAt DateTime @default(now())
   @@index([taskId, createdAt])
+}
+
+/// Phase 5B — assignment history (manual or automated). Does not grant access.
+model TaskAssignmentEvent {
+  id          String   @id @default(cuid())
+  taskId      String
+  task        Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  fromUserId  String?
+  toUserId    String?
+  /// null actor = SYSTEM automation
+  changedById String?
+  reason      String?
+  createdAt   DateTime @default(now())
+  @@index([taskId, createdAt])
+  @@index([toUserId, createdAt])
 }
 
 model StatusHistory {
@@ -1338,7 +1471,45 @@ model Notification {
   href      String?
   readAt    DateTime?
   createdAt DateTime @default(now())
+  deliveries NotificationDelivery[]
   @@index([userId, readAt, createdAt])
+}
+
+/// Phase 5C — per-user channel preferences by event category. Mandatory categories cannot disable in-app.
+model NotificationPreference {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// FOLLOW_UP | TASK_ASSIGNMENT | TASK_OVERDUE | ESCALATION | SLA_WARNING | CREDENTIAL_EXPIRY | REVALIDATION | SYSTEM
+  category     String
+  channelInApp Boolean  @default(true)
+  channelEmail Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  @@unique([userId, category])
+  @@index([userId])
+}
+
+/// Phase 5B — channel delivery ledger (email retries). In-app Notification remains authoritative inbox.
+model NotificationDelivery {
+  id             String    @id @default(cuid())
+  notificationId String?
+  notification   Notification? @relation(fields: [notificationId], references: [id], onDelete: SetNull)
+  userId         String
+  channel        String    // IN_APP | EMAIL
+  status         String    // PENDING | SENT | FAILED | RETRYING
+  attemptCount   Int       @default(0)
+  lastError      String?
+  nextRetryAt    DateTime?
+  sentAt         DateTime?
+  /// Prevents duplicate outbound sends for the same logical event+channel+user.
+  dedupeKey      String?   @unique
+  payloadSummary String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  @@index([status, nextRetryAt])
+  @@index([userId, createdAt])
+  @@index([notificationId])
 }
 
 /// Platform-global vs tenant-owned directory ownership.
@@ -2510,4 +2681,155 @@ model EnrollmentRevalidationEvent {
   metadata         Json?
   createdAt        DateTime                     @default(now())
   @@index([revalidationId, createdAt])
+}
+
+// ─── Phase 5B — Credentialing Workflow Automation (additive) ───
+
+enum AutomationPolicyKind {
+  FOLLOW_UP_INTERVAL
+  ESCALATION
+  SLA
+  EXPIRY_ALERT
+  TASK_ASSIGNMENT
+  NOTIFICATION
+}
+
+enum WorkflowSlaStatus {
+  NOT_STARTED
+  WITHIN_SLA
+  DUE_SOON
+  AT_RISK
+  OVERDUE
+  COMPLETED
+}
+
+/// Configurable automation policy. Tenant/org/payer scoping is optional (null = broader default).
+model AutomationPolicy {
+  id             String               @id @default(cuid())
+  tenantId       String?
+  tenant         Tenant?              @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization?        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  payerId        String?
+  payer          Payer?               @relation(fields: [payerId], references: [id], onDelete: Cascade)
+  kind           AutomationPolicyKind
+  name           String
+  description    String?
+  enabled        Boolean              @default(true)
+  /// Validated JSON: intervalsDays, thresholdsDays, targetRoles, channels, windowsDays, etc.
+  config         Json
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+  @@index([tenantId, kind, enabled])
+  @@index([organizationId, kind, enabled])
+  @@index([payerId, kind, enabled])
+  @@index([kind, enabled])
+}
+
+model AutomationJobLock {
+  lockKey     String   @id
+  ownerId     String
+  lockedUntil DateTime
+  updatedAt   DateTime @updatedAt
+  @@index([lockedUntil])
+}
+
+model AutomationJobRun {
+  id           String    @id @default(cuid())
+  jobType      String
+  tenantId     String?
+  tenant       Tenant?   @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  status       String
+  startedAt    DateTime  @default(now())
+  finishedAt   DateTime?
+  triggeredBy  String
+  lockKey      String?
+  result       Json?
+  errorMessage String?
+  @@index([jobType, startedAt])
+  @@index([tenantId, startedAt])
+  @@index([status, startedAt])
+}
+
+model WorkflowSlaRecord {
+  id                   String            @id @default(cuid())
+  tenantId             String
+  tenant               Tenant            @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organizationId       String?
+  organization         Organization?     @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  entityType           String
+  entityId             String
+  policyId             String?
+  applicationCreatedAt DateTime?
+  submissionDate       DateTime?
+  acknowledgementDate  DateTime?
+  lastActivityAt       DateTime?
+  expectedCompletionAt DateTime?
+  actualCompletionAt   DateTime?
+  elapsedDays          Int?
+  businessDaysElapsed  Int?
+  daysRemaining        Int?
+  overdueDays          Int?
+  slaStatus            WorkflowSlaStatus @default(NOT_STARTED)
+  /// Append-only SLA status transitions (never overwrite prior entries).
+  statusHistory        Json?
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+  @@unique([entityType, entityId])
+  @@index([tenantId, slaStatus])
+  @@index([organizationId, slaStatus])
+  @@index([slaStatus, expectedCompletionAt])
+  @@index([expectedCompletionAt])
+}
+
+model EscalationRecord {
+  id                    String    @id @default(cuid())
+  tenantId              String
+  tenant                Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organizationId        String?
+  organization          Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  entityType            String
+  entityId              String
+  level                 Int
+  reason                String
+  status                String    @default("OPEN")
+  assignedEmployeeId    String?
+  responsibleManagerId  String?
+  acknowledgedAt        DateTime?
+  acknowledgedById      String?
+  resolvedAt            DateTime?
+  resolvedById          String?
+  resolutionNotes       String?
+  /// Unique open-escalation key: entity+level (+threshold)
+  dedupeKey             String    @unique
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  @@index([tenantId, status, level])
+  @@index([organizationId, status])
+  @@index([entityType, entityId, status])
+  @@index([assignedEmployeeId, status])
+}
+
+model AutomationAlert {
+  id             String    @id @default(cuid())
+  tenantId       String
+  tenant         Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  organizationId String?
+  organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  alertType      String
+  entityType     String
+  entityId       String
+  thresholdKey   String
+  status         String    @default("PENDING")
+  notifiedUserIds Json?
+  taskId         String?
+  dedupeKey      String    @unique
+  acknowledgedAt DateTime?
+  acknowledgedById String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  @@index([tenantId, alertType, status])
+  @@index([organizationId, status])
+  @@index([entityType, entityId])
+  @@index([status, createdAt])
 }

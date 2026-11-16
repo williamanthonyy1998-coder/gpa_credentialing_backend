@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
+import { ensureUploadDir } from '../lib/uploadDir';
 import {
   computeCredentialAttention,
   isAgreementsCategory,
@@ -25,11 +26,11 @@ import {
   OTHER_DOCUMENTS_ALLOWED_MIME,
   validateUploadedFile
 } from '../services/fileMagic';
-import { assertRecordInTenant, requireTenantContext } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertResourceRecordAccess } from '../services/orgAccess';
 
 const router = Router();
-const uploadDir = path.resolve(process.cwd(), 'private-uploads');
-fs.mkdirSync(uploadDir, { recursive: true });
+const uploadDir = ensureUploadDir();
 
 const storage = multer.diskStorage({
   destination: (_req, _file, cb) => cb(null, uploadDir),
@@ -59,7 +60,13 @@ function resolveStoredPath(storageKey: string) {
 
 async function assertDocAccess(req: AuthRequest, documentId: string) {
   requireTenantContext(req.tenantContext);
-  await assertRecordInTenant(req.tenantContext!, 'documents', documentId);
+  await assertResourceRecordAccess(
+    req.user!.id,
+    req.user!.role,
+    'documents',
+    documentId,
+    req.tenantContext
+  );
 }
 
 router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, next) => {
@@ -294,7 +301,7 @@ router.delete('/:id/file', async (req: AuthRequest, res, next) => {
 
 router.post('/:id/extract', async (req: AuthRequest, res, next) => {
   try {
-    if (['AUDITOR', 'READ_ONLY'].includes(req.user!.role)) {
+    if (['AUDITOR', 'READ_ONLY', 'CLIENT_USER', 'EXTERNAL_PROVIDER'].includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot run extraction' });
     }
     const document = await prisma.document.findUnique({ where: { id: req.params.id } });
@@ -302,6 +309,17 @@ router.post('/:id/extract', async (req: AuthRequest, res, next) => {
     await assertDocAccess(req, document.id);
     if (!document.storageKey) {
       return res.status(400).json({ error: 'Upload a document before running extraction', ok: false });
+    }
+    // RT-05: never read quarantined / non-AVAILABLE bytes on the ordinary extract path.
+    const { canNormalDownload } = await import('../services/documentSecurity');
+    const security = (document as any).securityStatus || 'QUARANTINED';
+    if (!canNormalDownload(security)) {
+      return res.status(403).json({
+        error: 'Document is not available for extraction. Quarantined files require authorized release before processing.',
+        code: 'DOCUMENT_NOT_AVAILABLE',
+        securityStatus: security,
+        ok: false
+      });
     }
     const insurance = isInsuranceLiabilityType(document.type) || document.category === 'insurance';
     const banking = isBankingCredentialType(document.type) || document.category === 'banking';

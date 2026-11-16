@@ -27,19 +27,20 @@ import {
 } from '../services/bankingValidation';
 import {
   assertOrganizationAccess,
-  getAuthorizedOrganizationIds,
+  assertResourceRecordAccess,
+  getOrgRestrictionIds,
   resolveRecordOrganizationId
 } from '../services/orgAccess';
 import {
   andWhere,
   assertProviderInTenant,
-  assertRecordInTenant,
   assertRelatedRecordsSameTenant,
   listWhereForResource,
   requireTenantContext
 } from '../services/tenantAccess';
 import type { TenantAuthContext } from '../services/tenantAccess';
 import { assertCredentialCategoryCodeAssignable } from '../services/directoryIntegration';
+import { stripClientWritableFileFields } from '../services/documentAudience';
 
 const router = Router();
 
@@ -222,8 +223,10 @@ async function assertProviderIdsInOrg(
   }
 }
 
-function orgScopeFilter(orgIds: string[]) {
-  if (!orgIds.length) return null;
+/** null = unrestricted; empty = deny-all; otherwise intersect. */
+function orgScopeFilter(orgIds: string[] | null) {
+  if (orgIds === null) return null;
+  if (!orgIds.length) return { id: '__none__' };
   return {
     OR: [
       { organizationId: { in: orgIds } },
@@ -408,7 +411,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
     const providerId = String(req.query.providerId || '').trim();
     const q = String(req.query.q || '').trim();
 
-    const allowedOrgs = await getAuthorizedOrganizationIds(req.user!.id, req.user!.role, req.tenantContext);
+    const allowedOrgs = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
     let where: any = andWhere(listWhereForResource('documents', tenantId)!, {}) || {};
     if (category) where.category = category;
     const orgFilter = orgScopeFilter(allowedOrgs);
@@ -508,7 +511,13 @@ router.get('/attention', async (req: AuthRequest, res: Response, next: NextFunct
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
+    await assertResourceRecordAccess(
+      req.user!.id,
+      req.user!.role,
+      'documents',
+      req.params.id,
+      req.tenantContext
+    );
     const row = await prisma.document.findUnique({
       where: { id: req.params.id },
       include: credentialInclude
@@ -518,7 +527,10 @@ router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) =
       id: row.id, title: row.title, type: row.type, category: row.category
     });
     res.json(withAttention(row, new Date(), req.user!.role));
-  } catch (e) { next(e); }
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ error: e.message, code: e.code });
+    next(e);
+  }
 });
 
 router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
@@ -526,7 +538,7 @@ router.post('/', async (req: AuthRequest, res: Response, next: NextFunction) => 
     requireTenantContext(req.tenantContext);
     const tenantId = req.tenantContext!.tenantId;
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
-    const parsed = clean(docSchema.parse(req.body));
+    const parsed = stripClientWritableFileFields(clean(docSchema.parse(req.body)));
     sanitizeTypeSpecificFields(parsed.type, parsed.category, parsed);
     assertBankingWriteAccess(req.user!.role, parsed);
     const { rest, facilityIds, providerIds, draft } = stripAssociationFields(parsed);
@@ -587,8 +599,14 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
     requireTenantContext(req.tenantContext);
     const tenantId = req.tenantContext!.tenantId;
     if (!canWrite(req.user!.role)) return res.status(403).json({ error: 'Your role cannot modify records' });
-    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
-    const parsed = clean(docSchema.partial().parse(req.body));
+    await assertResourceRecordAccess(
+      req.user!.id,
+      req.user!.role,
+      'documents',
+      req.params.id,
+      req.tenantContext
+    );
+    const parsed = stripClientWritableFileFields(clean(docSchema.partial().parse(req.body)));
     const before = await prisma.document.findUnique({
       where: { id: req.params.id },
       include: { documentFacilities: true, documentProviders: true }
@@ -675,7 +693,13 @@ router.delete('/:id', async (req: AuthRequest, res: Response, next: NextFunction
     if (!([Role.ADMIN, Role.CREDENTIALING_MANAGER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
-    await assertRecordInTenant(req.tenantContext!, 'documents', req.params.id);
+    await assertResourceRecordAccess(
+      req.user!.id,
+      req.user!.role,
+      'documents',
+      req.params.id,
+      req.tenantContext
+    );
     const before = await prisma.document.findUnique({ where: { id: req.params.id } });
     if (!before) return res.status(404).json({ error: 'Document not found' });
     await prisma.document.delete({ where: { id: before.id } });

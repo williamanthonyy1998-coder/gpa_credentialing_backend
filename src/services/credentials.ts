@@ -1,5 +1,6 @@
 import { DocumentStatus, Prisma, Role } from '@prisma/client';
 import { decryptField, encryptField, maskLast4 } from '../lib/fieldCrypto';
+import { sanitizeDocumentForAudience } from './documentAudience';
 
 export const WARNING_DAY_OPTIONS = [30, 60, 90, 120] as const;
 export type WarningDays = (typeof WARNING_DAY_OPTIONS)[number];
@@ -207,7 +208,12 @@ export function serializeCredential<T extends Record<string, any>>(
     providerIds: (doc.documentProviders || []).map((l: any) => l.providerId ?? l.provider?.id).filter(Boolean),
     attention
   };
-  return presentBankingFields(base, role, opts);
+  const banking = presentBankingFields(base, role, opts);
+  // RT-02: audience-aware redaction for notes / storageKey / internal fields.
+  return sanitizeDocumentForAudience(banking, role) as T & {
+    attention: ReturnType<typeof computeCredentialAttention>;
+    hasFile?: boolean;
+  };
 }
 
 export function withAttention<T extends Record<string, any>>(

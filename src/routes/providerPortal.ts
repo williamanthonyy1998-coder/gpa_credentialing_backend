@@ -8,6 +8,7 @@ import { Role } from '@prisma/client';
 import { AuthRequest, allowRoles } from '../middleware/auth';
 import { audit } from '../lib/audit';
 import { prisma } from '../lib/prisma';
+import { ensureUploadDir } from '../lib/uploadDir';
 import {
   assertProviderOwnsIntake,
   createIntakeDocumentMeta,
@@ -23,8 +24,7 @@ import {
 } from '../services/fileMagic';
 
 const router = Router();
-const uploadDir = path.resolve(process.cwd(), 'private-uploads');
-fs.mkdirSync(uploadDir, { recursive: true });
+const uploadDir = ensureUploadDir();
 
 const upload = multer({
   storage: multer.diskStorage({

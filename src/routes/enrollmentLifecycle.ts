@@ -3,7 +3,8 @@ import { EnrollmentStatus, Priority, Role } from '@prisma/client';
 import { z } from 'zod';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { requireTenantContext, assertRecordInTenant } from '../services/tenantAccess';
+import { requireTenantContext } from '../services/tenantAccess';
+import { assertEnrollmentAccessFromReq } from '../services/enrollmentAccess';
 import {
   computeEnrollmentAttention,
   createEnrollmentFollowUp,
@@ -47,7 +48,7 @@ router.get('/dashboard', async (req: AuthRequest, res: Response, next: NextFunct
 router.get('/:id/history', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const rows = await prisma.statusHistory.findMany({
       where: { enrollmentId: req.params.id },
       orderBy: { createdAt: 'desc' },
@@ -63,7 +64,7 @@ router.get('/:id/history', async (req: AuthRequest, res: Response, next: NextFun
 router.post('/:id/prepare', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const row = await startPreparation(
       req.tenantContext!.tenantId!,
       req.params.id,
@@ -81,7 +82,7 @@ router.post('/:id/prepare', async (req: AuthRequest, res: Response, next: NextFu
 router.post('/:id/ready', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const row = await markReadyForSubmission(
       req.tenantContext!.tenantId!,
       req.params.id,
@@ -99,7 +100,7 @@ router.post('/:id/ready', async (req: AuthRequest, res: Response, next: NextFunc
 router.post('/:id/submit', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       submittedAt: z.coerce.date().optional().nullable(),
       referenceNo: z.string().max(200).optional().nullable(),
@@ -128,7 +129,7 @@ router.post('/:id/submit', async (req: AuthRequest, res: Response, next: NextFun
 router.post('/:id/acknowledge', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       acknowledgedAt: z.coerce.date().optional().nullable(),
       referenceNo: z.string().max(200).optional().nullable(),
@@ -153,7 +154,7 @@ router.post('/:id/acknowledge', async (req: AuthRequest, res: Response, next: Ne
 router.post('/:id/payer-review', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({ notes: z.string().max(4000).optional().nullable() }).parse(req.body || {});
     const row = await startPayerReview(
       req.tenantContext!.tenantId!,
@@ -173,7 +174,7 @@ router.post('/:id/payer-review', async (req: AuthRequest, res: Response, next: N
 router.post('/:id/request-information', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       reason: z.string().min(1).max(4000),
       nextFollowUpAt: z.coerce.date().optional().nullable()
@@ -196,7 +197,7 @@ router.post('/:id/request-information', async (req: AuthRequest, res: Response, 
 router.post('/:id/approve', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       decisionAt: z.coerce.date().optional().nullable(),
       referenceNo: z.string().max(200).optional().nullable(),
@@ -225,7 +226,7 @@ router.post('/:id/approve', async (req: AuthRequest, res: Response, next: NextFu
 router.post('/:id/effective', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       effectiveAt: z.coerce.date(),
       evidenceDocumentId: z.string().optional().nullable(),
@@ -253,7 +254,7 @@ router.post('/:id/effective', async (req: AuthRequest, res: Response, next: Next
 router.post('/:id/reject', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       reason: z.string().min(1).max(4000),
       evidenceDocumentId: z.string().optional().nullable(),
@@ -277,7 +278,7 @@ router.post('/:id/reject', async (req: AuthRequest, res: Response, next: NextFun
 router.post('/:id/terminate', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       reason: z.string().min(1).max(4000),
       terminatedAt: z.coerce.date().optional().nullable(),
@@ -301,7 +302,7 @@ router.post('/:id/terminate', async (req: AuthRequest, res: Response, next: Next
 router.post('/:id/follow-ups', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const body = z.object({
       dueAt: z.coerce.date(),
       reason: z.string().min(1).max(4000),
@@ -329,7 +330,7 @@ router.post('/:id/follow-ups', async (req: AuthRequest, res: Response, next: Nex
 router.get('/:id/attention', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'enrollments', req.params.id);
+    await assertEnrollmentAccessFromReq(req);
     const row = await prisma.enrollmentApplication.findUnique({ where: { id: req.params.id } });
     if (!row) return res.status(404).json({ error: 'Enrollment not found' });
     res.json({

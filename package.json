@@ -4,10 +4,12 @@
   "private": true,
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "postinstall": "prisma generate",
     "start": "node dist/src/server.js",
     "seed": "tsx prisma/seed.ts",
-    "test": "tsx --test src/services/workflow.test.ts src/services/profileCompletion.test.ts src/services/intakeConvert.test.ts src/services/credentials.attention.test.ts src/services/fileMagic.test.ts src/services/bankingValidation.test.ts src/services/facilityProviders.test.ts src/services/enrollments.test.ts src/services/enrollmentActivity.test.ts src/services/tenants.test.ts src/services/tenantIsolation.test.ts src/services/tenantAccess.unit.test.ts src/services/directories.test.ts src/services/directoryIntegration.test.ts src/services/directoryQuality.test.ts src/services/invitations.test.ts src/services/providerIntake.test.ts src/services/intakeStateMachine.test.ts src/services/documentSecurity.test.ts src/services/professionalHistory.test.ts src/services/licenseLifecycle.test.ts src/services/credentialingReadiness.test.ts src/services/credentialingQa.test.ts src/services/enrollmentLifecycle.test.ts src/services/requirementConditions.test.ts src/services/enrollmentPacket.test.ts src/services/enrollmentSubmission.test.ts src/services/externalIntegrations.test.ts src/services/enrollmentRevalidation.test.ts src/services/productionReadiness.security.test.ts src/services/securityRemediation.test.ts",
+    "test": "tsx --test src/services/workflow.test.ts src/services/profileCompletion.test.ts src/services/intakeConvert.test.ts src/services/credentials.attention.test.ts src/services/fileMagic.test.ts src/services/bankingValidation.test.ts src/services/facilityProviders.test.ts src/services/enrollments.test.ts src/services/enrollmentActivity.test.ts src/services/tenants.test.ts src/services/tenantIsolation.test.ts src/services/tenantAccess.unit.test.ts src/services/directories.test.ts src/services/directoryIntegration.test.ts src/services/directoryQuality.test.ts src/services/invitations.test.ts src/services/providerIntake.test.ts src/services/intakeStateMachine.test.ts src/services/documentSecurity.test.ts src/services/documentAudience.test.ts src/services/professionalHistory.test.ts src/services/licenseLifecycle.test.ts src/services/credentialingReadiness.test.ts src/services/credentialingQa.test.ts src/services/enrollmentLifecycle.test.ts src/services/requirementConditions.test.ts src/services/enrollmentPacket.test.ts src/services/enrollmentSubmission.test.ts src/services/externalIntegrations.test.ts src/services/enrollmentRevalidation.test.ts src/services/productionReadiness.security.test.ts src/services/securityRemediation.test.ts src/services/securityRemediation.round2.test.ts src/lib/runtimeSecurity.round2.test.ts src/services/securityHardening.closure.test.ts src/services/organizationWorkspace.phase5a.test.ts src/services/automation.phase5b.test.ts src/services/automation.phase5c.test.ts",
+    "e2e:db:prepare": "node scripts/prepare-isolated-e2e-db.mjs",
     "smoke": "tsx scripts/smoke-api.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate deploy",
@@ -16,9 +18,16 @@
     "e2e:seed": "tsx scripts/seed-e2e-provider-intake.ts",
     "db:repair-user": "prisma db execute --schema prisma/schema.prisma --file prisma/fixes/user_employee_columns.sql && prisma generate"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1168.0",
+    "@aws-sdk/s3-request-presigner": "^3.1168.0",
     "@prisma/client": "^6.19.0",
+    "@types/cookie-parser": "^1.4.10",
     "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "exceljs": "^4.4.0",
@@ -30,6 +39,7 @@
     "multer": "^1.4.5-lts.1",
     "pdf-parse": "^1.1.1",
     "pdfkit": "^0.20.2",
+    "prisma": "^6.19.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
@@ -43,7 +53,6 @@
     "@types/pdf-parse": "^1.1.4",
     "@types/pdfkit": "^0.17.7",
     "pg": "^8.23.1",
-    "prisma": "^6.19.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

@@ -1,16 +1,25 @@
 import { Router, Response, NextFunction } from 'express';
 import rateLimit from 'express-rate-limit';
 import { z } from 'zod';
-import jwt from 'jsonwebtoken';
 import { prisma } from '../lib/prisma';
+import { createAuthSession } from '../services/authSession';
+import { issueCsrfToken, setCsrfCookie, setSessionCookie } from '../lib/sessionCookies';
 import { audit } from '../lib/audit';
-import { AuthRequest, authenticate, attachTenantContext } from '../middleware/auth';
+import { AuthRequest, authenticate, attachTenantContext, requireCsrfForCookieAuth } from '../middleware/auth';
 import {
   acceptProviderIntakeInvitation,
   validateProviderInviteToken
 } from '../services/providerInvitations';
 
 const router = Router();
+
+function clientMeta(req: { ip?: string; headers: Record<string, string | string[] | undefined> }) {
+  const ua = req.headers['user-agent'];
+  return {
+    ipAddress: req.ip || (typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : null),
+    userAgent: Array.isArray(ua) ? ua[0] || null : (ua || null)
+  };
+}
 
 const acceptLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -45,18 +54,19 @@ router.post('/:token/accept', acceptLimiter, async (req, res: Response, next: Ne
       password: body.password
     });
 
-    const secret = process.env.JWT_SECRET;
-    if (!secret || secret.length < 32) return res.status(500).json({ error: 'Server authentication configuration is invalid' });
-
     const user = await prisma.user.findUniqueOrThrow({
       where: { id: result.userId },
       select: { id: true, email: true, name: true, role: true }
     });
-    const token = jwt.sign(
-      { id: user.id, email: user.email, role: user.role },
-      secret,
-      { expiresIn: (process.env.JWT_EXPIRES_IN || '8h') as any }
-    );
+    const session = await createAuthSession({
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      ...clientMeta(req)
+    });
+    setSessionCookie(res, session.token);
+    const csrf = issueCsrfToken();
+    setCsrfCookie(res, csrf);
 
     await prisma.auditEvent.create({
       data: {
@@ -69,12 +79,13 @@ router.post('/:token/accept', acceptLimiter, async (req, res: Response, next: Ne
     });
 
     res.json({
-      token,
       user,
       tenants: [],
       defaultTenantId: null,
       intakeRequestId: result.intakeRequestId,
-      redirectTo: `/provider-portal/intakes/${result.intakeRequestId}`
+      redirectTo: `/provider-portal/intakes/${result.intakeRequestId}`,
+      csrfToken: csrf,
+      authMode: 'cookie'
     });
   } catch (e: any) {
     if (e?.code === 'USER_EXISTS') {
@@ -88,7 +99,7 @@ router.post('/:token/accept', acceptLimiter, async (req, res: Response, next: Ne
   }
 });
 
-router.post('/:token/accept-authenticated', acceptLimiter, authenticate, attachTenantContext, async (req: AuthRequest, res: Response, next: NextFunction) => {
+router.post('/:token/accept-authenticated', acceptLimiter, authenticate, requireCsrfForCookieAuth, attachTenantContext, async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     const result = await acceptProviderIntakeInvitation({
       rawToken: req.params.token,

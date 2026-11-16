@@ -541,17 +541,13 @@ export async function createIntakeDocumentMeta(input: {
   });
 }
 
-/** @deprecated Prefer documentSecurity.releaseDocumentFromQuarantine with role + reason. */
-export async function releaseDocumentFromQuarantine(
-  documentId: string,
-  actorId: string,
-  options?: { role?: Role | string; reason?: string }
-) {
+/** @deprecated Import from documentSecurity and pass a single typed object. */
+export async function releaseDocumentFromQuarantine(input: {
+  documentId: string;
+  actorId: string;
+  role: Role | string;
+  reason: string;
+}) {
   const { releaseDocumentFromQuarantine: release } = await import('./documentSecurity');
-  return release({
-    documentId,
-    actorId,
-    role: options?.role || Role.ADMIN,
-    reason: options?.reason || 'Authorized manual review release — not malware-scanned'
-  });
+  return release(input);
 }

@@ -8,10 +8,27 @@ import {
   requireTenantContext
 } from './tenantAccess';
 
+/** GPA platform staff may operate tenant-wide unless explicitly narrowed by UserOrganization rows. */
+export function isTenantWideOrgRole(role: Role | string): boolean {
+  return (
+    role === Role.ADMIN
+    || role === Role.CREDENTIALING_MANAGER
+    || role === Role.CREDENTIALING_SPECIALIST
+    || role === Role.ENROLLMENT_SPECIALIST
+    || role === Role.APPROVER
+    || role === Role.AUDITOR
+    || role === Role.READ_ONLY
+  );
+}
+
 /**
- * Phase 0B: organization access is scoped to the active tenant.
- * Empty UserOrganization membership no longer grants global access.
- * Optional UserOrganization rows further narrow orgs within the tenant when present.
+ * Organization access is scoped to the active tenant (RT-06).
+ *
+ * Policy:
+ * - GPA staff: tenant-wide by default; optional UserOrganization rows narrow access.
+ * - CLIENT_USER: default deny when no UserOrganization rows; never silent tenant-wide.
+ * - EXTERNAL_PROVIDER: empty org set here (intake/ownership paths authorize separately).
+ * - Empty membership for clients is deny, not grant-all.
  */
 export async function getAuthorizedOrganizationIds(
   userId: string,
@@ -25,12 +42,21 @@ export async function getAuthorizedOrganizationIds(
       where: { userId, organizationId: { in: tenantOrgIds } },
       select: { organizationId: true }
     });
-    // Within-tenant org ACL: if user has UserOrganization rows, intersect.
-    // If none, all orgs in the active tenant are allowed (tenant membership is the boundary).
-    if (memberships.length) {
-      return memberships.map((m) => m.organizationId);
+    const assigned = memberships.map((m) => m.organizationId);
+
+    if (role === Role.EXTERNAL_PROVIDER) {
+      return assigned;
     }
-    return tenantOrgIds;
+    if (role === Role.CLIENT_USER) {
+      // Default deny — client users must be explicitly assigned to organizations.
+      return assigned;
+    }
+    if (isTenantWideOrgRole(role)) {
+      if (assigned.length) return assigned;
+      return tenantOrgIds;
+    }
+    // Unknown / unexpected roles: deny-by-default.
+    return assigned;
   }
 
   // Legacy callers without tenant context: deny-by-default (empty).
@@ -79,7 +105,9 @@ const ORG_SCOPED_RESOURCES = new Set([
   'cases',
   'documents',
   'tasks',
-  'providers'
+  'providers',
+  'licenses',
+  'intake'
 ]);
 
 /** Resolve the organization id that owns a directory/workflow record, when possible. */
@@ -116,6 +144,14 @@ export async function resolveRecordOrganizationId(resource: string, id: string):
         select: { practice: { select: { organizationId: true } } }
       });
       return viaPractice?.practice?.organizationId || null;
+    }
+    case 'licenses': {
+      const row = await prisma.license.findUnique({
+        where: { id },
+        select: { providerId: true }
+      });
+      if (!row?.providerId) return null;
+      return resolveRecordOrganizationId('providers', row.providerId);
     }
     case 'enrollments': {
       const row = await prisma.enrollmentApplication.findUnique({
@@ -184,6 +220,13 @@ export async function resolveRecordOrganizationId(resource: string, id: string):
         || row?.credentialingCase?.practice?.organizationId
         || null;
     }
+    case 'intake': {
+      const row = await prisma.intakeRequest.findUnique({
+        where: { id },
+        select: { organizationId: true }
+      });
+      return row?.organizationId || null;
+    }
     default:
       return null;
   }
@@ -211,14 +254,17 @@ export async function assertResourceRecordAccess(
       const tenantOrgs = await getTenantOrganizationIds(tenantCtx.tenantId!);
       const isOrgRestricted = allowed.length < tenantOrgs.length;
 
-      if (resource === 'providers') {
-        // Allow if any linked organization is in the caller's authorized set.
+      if (resource === 'providers' || resource === 'licenses') {
+        const providerId = resource === 'providers'
+          ? id
+          : (await prisma.license.findUnique({ where: { id }, select: { providerId: true } }))?.providerId;
+        if (!providerId) denyNotFound();
         const links = await prisma.providerOrganization.findMany({
-          where: { providerId: id },
+          where: { providerId },
           select: { organizationId: true }
         });
         const practiceLinks = await prisma.providerPractice.findMany({
-          where: { providerId: id },
+          where: { providerId },
           select: { practice: { select: { organizationId: true } } }
         });
         const providerOrgIds = [
@@ -227,7 +273,8 @@ export async function assertResourceRecordAccess(
         ];
         if (providerOrgIds.length) {
           if (!providerOrgIds.some((oid) => allowed.includes(oid))) denyNotFound();
-        } else if (isOrgRestricted) {
+        } else if (isOrgRestricted || allowed.length === 0) {
+          // Ambiguous / unlinked provider under org-restricted or empty allow-list → deny.
           denyNotFound();
         }
         return;
@@ -236,8 +283,8 @@ export async function assertResourceRecordAccess(
       const orgId = await resolveRecordOrganizationId(resource, id);
       if (orgId) {
         await assertOrganizationAccess(userId, role, orgId, tenantCtx);
-      } else if (isOrgRestricted && resource !== 'licenses') {
-        // Org-scoped resource missing ownership → deny for org-restricted clients.
+      } else if (isOrgRestricted || allowed.length === 0) {
+        // Org-scoped resource missing ownership → deny for restricted / empty allow-list callers.
         denyNotFound();
       }
     }
@@ -258,7 +305,9 @@ export async function getOrgRestrictionIds(
   if (!tenantCtx?.tenantId) return null;
   const allowed = await getAuthorizedOrganizationIds(userId, role, tenantCtx);
   const tenantOrgs = await getTenantOrganizationIds(tenantCtx.tenantId);
-  if (allowed.length >= tenantOrgs.length) return null;
+  // Empty allow-list is a hard restriction (deny-all), not "unrestricted".
+  if (allowed.length === 0) return [];
+  if (tenantOrgs.length > 0 && allowed.length >= tenantOrgs.length) return null;
   return allowed;
 }
 
@@ -323,6 +372,19 @@ export function orgListWhereForResource(
           { credentialingCase: { is: { practice: { is: { organizationId: inOrgs } } } } }
         ]
       };
+    case 'licenses':
+      return {
+        provider: {
+          is: {
+            OR: [
+              { organizations: { some: { organizationId: inOrgs } } },
+              { practices: { some: { practice: { is: { organizationId: inOrgs } } } } }
+            ]
+          }
+        }
+      };
+    case 'intake':
+      return { organizationId: inOrgs };
     default:
       return null;
   }

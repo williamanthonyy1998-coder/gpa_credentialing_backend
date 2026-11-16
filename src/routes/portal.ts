@@ -14,6 +14,12 @@ import {
   updateClientAccount
 } from '../services/clients';
 import { createInvitation, listInvitations } from '../services/invitations';
+import {
+  assignUserOrganization,
+  listUserOrganizations,
+  revokeUserOrganization
+} from '../services/userOrganizations';
+import { getPortalWorkflowSummary } from '../services/portalWorkflowSummary';
 
 const router = Router();
 
@@ -136,6 +142,67 @@ router.get('/members', async (req: AuthRequest, res: Response, next: NextFunctio
     });
     res.json(rows);
   } catch (e) {
+    next(e);
+  }
+});
+
+/** RT-06: list organization assignments for a tenant member. */
+router.get('/members/:userId/organizations', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    requireTenantContext(req.tenantContext);
+    if (!canManageTenantUsers(req.tenantContext!.tenantRole) && req.user!.role !== Role.ADMIN) {
+      return res.status(403).json({ error: 'Insufficient permissions' });
+    }
+    const rows = await listUserOrganizations({
+      tenantId: req.tenantContext!.tenantId!,
+      userId: req.params.userId
+    });
+    res.json({ items: rows });
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ error: e.message, code: e.code });
+    next(e);
+  }
+});
+
+/** RT-06: assign an organization to a tenant member (same-tenant only). */
+router.post('/members/:userId/organizations', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    requireTenantContext(req.tenantContext);
+    const body = z.object({ organizationId: z.string().min(1) }).parse(req.body);
+    const row = await assignUserOrganization({
+      tenantId: req.tenantContext!.tenantId!,
+      userId: req.params.userId,
+      organizationId: body.organizationId,
+      actorId: req.user!.id,
+      actorPlatformRole: req.user!.role,
+      actorTenantRole: req.tenantContext!.tenantRole
+    });
+    await audit(req, 'USER_ORGANIZATION_ASSIGN', 'userOrganizations', row.id, undefined, {
+      userId: req.params.userId,
+      organizationId: body.organizationId
+    });
+    res.status(201).json(row);
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ error: e.message, code: e.code });
+    next(e);
+  }
+});
+
+/** RT-06: revoke an organization assignment. */
+router.delete('/members/:userId/organizations/:organizationId', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    requireTenantContext(req.tenantContext);
+    const result = await revokeUserOrganization({
+      tenantId: req.tenantContext!.tenantId!,
+      userId: req.params.userId,
+      organizationId: req.params.organizationId,
+      actorPlatformRole: req.user!.role,
+      actorTenantRole: req.tenantContext!.tenantRole
+    });
+    await audit(req, 'USER_ORGANIZATION_REVOKE', 'userOrganizations', undefined, undefined, result);
+    res.json(result);
+  } catch (e: any) {
+    if (e?.status) return res.status(e.status).json({ error: e.message, code: e.code });
     next(e);
   }
 });
@@ -387,6 +454,31 @@ router.get('/provider-intakes/:id', async (req: AuthRequest, res: Response, next
       return res.status(404).json({ error: 'Intake request not found' });
     }
     res.json(sanitizeIntakeForClient(row));
+  } catch (e) { next(e); }
+});
+
+router.get('/workflow-summary', async (req: AuthRequest, res: Response, next: NextFunction) => {
+  try {
+    requireTenantContext(req.tenantContext);
+    if (req.user!.role !== Role.CLIENT_USER && req.user!.role !== Role.ADMIN && req.user!.role !== Role.CREDENTIALING_MANAGER) {
+      // Portal summary is for client users; GPA staff may preview when impersonating tenant context.
+      if (req.user!.role === Role.EXTERNAL_PROVIDER) {
+        return res.status(403).json({ error: 'Insufficient permissions' });
+      }
+    }
+    const data = await getPortalWorkflowSummary({
+      userId: req.user!.id,
+      role: req.user!.role,
+      tenantCtx: req.tenantContext!,
+      organizationId: typeof req.query.organizationId === 'string' ? req.query.organizationId : undefined,
+      providerId: typeof req.query.providerId === 'string' ? req.query.providerId : undefined,
+      payerId: typeof req.query.payerId === 'string' ? req.query.payerId : undefined,
+      status: typeof req.query.status === 'string' ? req.query.status : undefined,
+      slaStatus: typeof req.query.slaStatus === 'string' ? req.query.slaStatus : undefined,
+      from: req.query.from ? new Date(String(req.query.from)) : undefined,
+      to: req.query.to ? new Date(String(req.query.to)) : undefined
+    });
+    res.json(data);
   } catch (e) { next(e); }
 });
 

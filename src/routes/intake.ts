@@ -9,19 +9,21 @@ import { convertIntake, missingIntakeFields } from '../services/intakeConvert';
 import { notifyUser } from '../services/notifications';
 import {
   assertOrganizationInTenant,
-  assertRecordInTenant,
   requireTenantContext
 } from '../services/tenantAccess';
+import { getOrgRestrictionIds } from '../services/orgAccess';
+import { assertIntakeAccessFromReq } from '../services/enrollmentAccess';
 import {
   approveIntake,
   canApproveIntake,
   canReviewIntake,
   rejectIntake,
-  releaseDocumentFromQuarantine,
   requestIntakeChanges,
   resolveAmbiguousIdentity,
   sanitizeIntakeForClient
 } from '../services/providerIntake';
+import { releaseDocumentFromQuarantine } from '../services/documentSecurity';
+import { assertResourceRecordAccess } from '../services/orgAccess';
 import {
   createProviderIntakeInvitation,
   listProviderInvitations,
@@ -41,6 +43,12 @@ const router = Router();
 
 function intakeTenantWhere(tenantId: string) {
   return { OR: [{ tenantId }, { organization: { is: { tenantId } } }] };
+}
+
+function intakeOrgScope(orgIds: string[] | null) {
+  if (orgIds === null) return undefined;
+  if (!orgIds.length) return { id: '__none__' };
+  return { organizationId: { in: orgIds } };
 }
 
 const include = {
@@ -86,7 +94,11 @@ function refNo() {
 router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    const tenantScope = intakeTenantWhere(req.tenantContext!.tenantId);
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
+    const orgScope = intakeOrgScope(orgIds);
+    const andBase: any[] = [intakeTenantWhere(req.tenantContext!.tenantId)];
+    if (orgScope) andBase.push(orgScope);
+    const tenantScope = { AND: andBase };
     const [total, draft, sent, submitted, underReview, converted, pending] = await Promise.all([
       prisma.intakeRequest.count({ where: tenantScope }),
       prisma.intakeRequest.count({ where: { AND: [tenantScope, { status: 'DRAFT' }] } }),
@@ -103,12 +115,14 @@ router.get('/summary', async (req: AuthRequest, res: Response, next: NextFunctio
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    const tenantScope = intakeTenantWhere(req.tenantContext!.tenantId);
+    const orgIds = await getOrgRestrictionIds(req.user!.id, req.user!.role, req.tenantContext);
+    const orgScope = intakeOrgScope(orgIds);
     const q = String(req.query.q || '').trim();
     const status = String(req.query.status || '').trim();
     const page = Math.max(1, Number(req.query.page) || 1);
     const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 25));
-    const and: any[] = [tenantScope];
+    const and: any[] = [intakeTenantWhere(req.tenantContext!.tenantId)];
+    if (orgScope) and.push(orgScope);
     if (status) and.push({ status });
     if (q) {
       and.push({
@@ -194,9 +208,18 @@ router.post('/documents/:documentId/release', async (req: AuthRequest, res: Resp
     }
     const doc = await prisma.document.findUnique({ where: { id: req.params.documentId } });
     if (!doc) return res.status(404).json({ error: 'Document not found' });
-    await assertRecordInTenant(req.tenantContext!, 'documents', doc.id);
+    // RT-04 / RT-06: tenant + organization ACL before release; object-contract service call.
+    await assertResourceRecordAccess(
+      req.user!.id,
+      req.user!.role,
+      'documents',
+      doc.id,
+      req.tenantContext
+    );
     const previousStatus = doc.securityStatus;
-    const updated = await releaseDocumentFromQuarantine(doc.id, req.user!.id, {
+    const updated = await releaseDocumentFromQuarantine({
+      documentId: doc.id,
+      actorId: req.user!.id,
       role: req.user!.role,
       reason
     });
@@ -205,7 +228,8 @@ router.post('/documents/:documentId/release', async (req: AuthRequest, res: Resp
       previousStatus,
       reason,
       malwareScanned: false,
-      note: 'Manual review release — not malware-scanned'
+      note: 'Manual review release — not malware-scanned',
+      manualRelease: true
     });
     res.json({
       ...updated,
@@ -220,7 +244,7 @@ router.post('/documents/:documentId/release', async (req: AuthRequest, res: Resp
 router.get('/:id', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     const row = await prisma.intakeRequest.findUnique({ where: { id: req.params.id }, include });
     if (!row) return res.status(404).json({ error: 'Intake request not found' });
     res.json(row);
@@ -277,7 +301,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
   try {
     requireTenantContext(req.tenantContext);
     const tenantId = req.tenantContext!.tenantId;
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (([Role.READ_ONLY, Role.AUDITOR] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot update intake requests' });
     }
@@ -317,7 +341,7 @@ router.patch('/:id', async (req: AuthRequest, res: Response, next: NextFunction)
 async function transition(req: AuthRequest, res: Response, next: NextFunction, action: string, status: IntakeStatus, extra: any = {}) {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (([Role.READ_ONLY, Role.AUDITOR, Role.EXTERNAL_PROVIDER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot perform this action' });
     }
@@ -359,7 +383,7 @@ router.post('/:id/review', (req, res, next) => transition(req, res, next, 'REVIE
 router.post('/:id/convert', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (([Role.READ_ONLY, Role.AUDITOR, Role.CLIENT_USER, Role.EXTERNAL_PROVIDER] as Role[]).includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot convert intake requests' });
     }
@@ -378,7 +402,7 @@ router.post('/:id/convert', async (req: AuthRequest, res: Response, next: NextFu
 router.post('/:id/invite-provider', inviteLimiter, async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (!canReviewIntake(req.user!.role) && req.user!.role !== Role.CLIENT_USER) {
       return res.status(403).json({ error: 'Insufficient permissions' });
     }
@@ -416,7 +440,7 @@ router.post('/:id/invite-provider', inviteLimiter, async (req: AuthRequest, res:
 router.get('/:id/provider-invitations', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     res.json(await listProviderInvitations(req.tenantContext!.tenantId!, req.params.id));
   } catch (e) { next(e); }
 });
@@ -424,7 +448,7 @@ router.get('/:id/provider-invitations', async (req: AuthRequest, res: Response, 
 router.post('/:id/request-changes', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (!canReviewIntake(req.user!.role)) return res.status(403).json({ error: 'Insufficient permissions' });
     const body = z.object({
       comments: z.string().min(2),
@@ -444,7 +468,7 @@ router.post('/:id/request-changes', async (req: AuthRequest, res: Response, next
 router.post('/:id/approve', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (!canApproveIntake(req.user!.role)) return res.status(403).json({ error: 'Insufficient permissions' });
     const body = z.object({
       reviewerComments: z.string().optional().nullable(),
@@ -462,7 +486,7 @@ router.post('/:id/approve', async (req: AuthRequest, res: Response, next: NextFu
 router.post('/:id/reject', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (!canApproveIntake(req.user!.role)) return res.status(403).json({ error: 'Insufficient permissions' });
     const body = z.object({
       reason: z.string().min(2),
@@ -480,7 +504,7 @@ router.post('/:id/reject', async (req: AuthRequest, res: Response, next: NextFun
 router.post('/:id/resolve-identity', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     if (!canApproveIntake(req.user!.role)) return res.status(403).json({ error: 'Insufficient permissions' });
     const body = z.object({
       decision: z.enum(['USE_EXISTING', 'CREATE_NEW']),
@@ -499,7 +523,7 @@ router.post('/:id/resolve-identity', async (req: AuthRequest, res: Response, nex
 router.get('/:id/safe', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     requireTenantContext(req.tenantContext);
-    await assertRecordInTenant(req.tenantContext!, 'intake', req.params.id);
+    await assertIntakeAccessFromReq(req);
     const row = await prisma.intakeRequest.findUnique({
       where: { id: req.params.id },
       include: {
