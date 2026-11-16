@@ -64,6 +64,28 @@ test('production config refuses missing storage/scanner integrations', () => {
     }),
     /durable object storage/
   );
+  assert.throws(
+    () => assertProductionSecurityIntegrations({
+      NODE_ENV: 'production',
+      OBJECT_STORAGE_DRIVER: 'supabase'
+    }),
+    /SUPABASE_URL|incomplete/
+  );
+  // Production default (unset driver) is supabase — must not require S3 vars.
+  assert.throws(
+    () => assertProductionSecurityIntegrations({
+      NODE_ENV: 'production'
+    }),
+    /SUPABASE_/
+  );
+  assert.doesNotThrow(() => assertProductionSecurityIntegrations({
+    NODE_ENV: 'production',
+    OBJECT_STORAGE_DRIVER: 'supabase',
+    SUPABASE_URL: 'https://example.supabase.co',
+    SUPABASE_SERVICE_ROLE_KEY: 'service-role-test-key',
+    SUPABASE_STORAGE_BUCKET: 'credentialing-docs',
+    MALWARE_SCANNER_URL: 'https://scanner.example/scan'
+  }));
   assert.doesNotThrow(() => assertProductionSecurityIntegrations({
     NODE_ENV: 'production',
     OBJECT_STORAGE_DRIVER: 's3',

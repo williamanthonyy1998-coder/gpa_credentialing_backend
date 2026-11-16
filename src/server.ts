@@ -55,6 +55,7 @@ import {
   isProductionRuntime,
   resolveTrustProxySetting
 } from './lib/runtimeSecurity';
+import { assertObjectStorageReachable } from './lib/objectStorage';
 import { startAutomationScheduler, stopAutomationScheduler } from './services/automationScheduler';
 
 // C2 / C3 / H6 / CORS / storage / scanner: refuse unsafe production configuration before listening.
@@ -178,16 +179,29 @@ const isServerlessRuntime = Boolean(process.env.VERCEL) || process.env.SERVERLES
 
 if (!isServerlessRuntime) {
   const port = Number(process.env.PORT || 4000);
-  const server = app.listen(port, () => {
-    console.log(`Credentialing API listening on :${port}`);
-    startAutomationScheduler();
+  void (async () => {
+    try {
+      await assertObjectStorageReachable();
+    } catch (err) {
+      console.error(err);
+      process.exit(1);
+    }
+    const server = app.listen(port, () => {
+      console.log(`Credentialing API listening on :${port}`);
+      startAutomationScheduler();
+    });
+    const shutdown = async () => {
+      await stopAutomationScheduler();
+      server.close();
+      await prisma.$disconnect();
+      process.exit(0);
+    };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+  })();
+} else if (process.env.NODE_ENV === 'production' && process.env.OBJECT_STORAGE_PROBE_ON_BOOT !== '0') {
+  // Serverless cold start: best-effort reachability probe (env validation already ran above).
+  void assertObjectStorageReachable().catch((err) => {
+    console.error(err);
   });
-  const shutdown = async () => {
-    await stopAutomationScheduler();
-    server.close();
-    await prisma.$disconnect();
-    process.exit(0);
-  };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
 }

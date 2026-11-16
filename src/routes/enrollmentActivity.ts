@@ -1,16 +1,12 @@
-import { Router, Response, NextFunction, type Request } from 'express';
+import { Router, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import multer, { type FileFilterCallback } from 'multer';
-import fs from 'node:fs';
-import path from 'node:path';
-import crypto from 'node:crypto';
 import { Role } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { audit } from '../lib/audit';
 import { AuthRequest } from '../middleware/auth';
-import { ensureUploadDir } from '../lib/uploadDir';
+import { createMemoryUpload, persistUploadedDocumentFile } from '../lib/documentObjectStore';
 import { requireTenantContext } from '../services/tenantAccess';
-import { GENERAL_ALLOWED_MIME, validateUploadedFile } from '../services/fileMagic';
+import { GENERAL_ALLOWED_MIME } from '../services/fileMagic';
 import {
   ENROLLMENT_ACTIVITY_TYPES,
   activityInclude,
@@ -25,29 +21,7 @@ import {
 
 const router = Router({ mergeParams: true });
 
-const uploadDir = ensureUploadDir();
-
-const storage = multer.diskStorage({
-  destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
-    cb(null, uploadDir);
-  },
-  filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
-    cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase().slice(0, 12)}`);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024, files: 1 },
-  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
-    cb(null, GENERAL_ALLOWED_MIME.has(file.mimetype));
-  }
-});
-
-function safeUnlink(p?: string | null) {
-  if (!p) return;
-  try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* ignore */ }
-}
+const upload = createMemoryUpload(GENERAL_ALLOWED_MIME);
 
 function enrollmentIdFrom(req: AuthRequest) {
   return String(req.params.id || '');
@@ -440,47 +414,61 @@ router.put('/:id/approval', async (req: AuthRequest, res: Response, next: NextFu
 router.post('/:id/approval/documents', upload.single('file'), async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
     if (!canWriteEnrollmentActivity(req.user!.role)) {
-      if (req.file) safeUnlink(req.file.path);
       return res.status(403).json({ error: 'Your role cannot upload approval documents' });
     }
-    if (!req.file) return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    }
 
     const enrollment = await loadEnrollmentForAccess(enrollmentIdFrom(req), req.user!.id, req.user!.role, req.tenantContext);
+    requireTenantContext(req.tenantContext);
+    const tenantId = req.tenantContext!.tenantId;
     const title = String(req.body?.title || req.file.originalname || 'Approval document').slice(0, 200);
     const docType = String(req.body?.type || 'APPROVAL_LETTER').slice(0, 80);
 
-    const validation = validateUploadedFile({
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      declaredMime: req.file.mimetype,
-      allowedMimes: GENERAL_ALLOWED_MIME
+    // Create metadata row first so the durable object key can include documentId.
+    const pending = await prisma.document.create({
+      data: {
+        tenantId,
+        title,
+        type: docType,
+        category: 'enrollment_approval',
+        organizationId: enrollment.organizationId,
+        facilityId: enrollment.facilityId,
+        practiceId: enrollment.practiceId,
+        providerId: enrollment.providerId,
+        enrollmentId: enrollment.id,
+        createdById: req.user!.id,
+        securityStatus: 'QUARANTINED'
+      }
     });
-    if (!validation.ok) {
-      safeUnlink(req.file.path);
-      return res.status(400).json({ error: validation.error });
+
+    const { scanOrQuarantine } = await import('../services/documentSecurity');
+    let persisted;
+    try {
+      persisted = await persistUploadedDocumentFile({
+        tenantId,
+        documentId: pending.id,
+        file: req.file,
+        allowedMimes: GENERAL_ALLOWED_MIME,
+        scanDocument: scanOrQuarantine
+      });
+    } catch (e: any) {
+      await prisma.document.delete({ where: { id: pending.id } }).catch(() => undefined);
+      if (e?.status === 400) return res.status(400).json({ error: e.message });
+      throw e;
     }
 
     const result = await prisma.$transaction(async (tx) => {
-      requireTenantContext(req.tenantContext);
-      const document = await tx.document.create({
+      const document = await tx.document.update({
+        where: { id: pending.id },
         data: {
-          tenantId: req.tenantContext!.tenantId,
-          title,
-          type: docType,
-          category: 'enrollment_approval',
-          organizationId: enrollment.organizationId,
-          facilityId: enrollment.facilityId,
-          practiceId: enrollment.practiceId,
-          providerId: enrollment.providerId,
-          enrollmentId: enrollment.id,
-          createdById: req.user!.id,
-          storageKey: req.file!.filename,
-          originalName: req.file!.originalname,
-          mimeType: req.file!.mimetype,
-          sizeBytes: req.file!.size,
+          storageKey: persisted.storageKey,
+          originalName: persisted.originalName,
+          mimeType: persisted.mimeType,
+          sizeBytes: persisted.sizeBytes,
           uploadedAt: new Date(),
-          // H1/H2: enrollment approval uploads start quarantined
-          securityStatus: 'QUARANTINED'
+          securityStatus: persisted.scan.status
         }
       });
       await tx.enrollmentActivity.create({
@@ -514,7 +502,6 @@ router.post('/:id/approval/documents', upload.single('file'), async (req: AuthRe
       createdAt: result.createdAt
     });
   } catch (e: any) {
-    if (req.file) safeUnlink(req.file.path);
     if (e?.status) return res.status(e.status).json({ error: e.message });
     next(e);
   }

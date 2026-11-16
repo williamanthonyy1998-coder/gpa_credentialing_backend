@@ -187,14 +187,49 @@ export function assertSafeRuntimeConfig(env: RuntimeEnv = process.env): void {
 /** Production storage + malware scanner gates (optional deps). */
 export function assertProductionSecurityIntegrations(env: RuntimeEnv = process.env): void {
   if (env.NODE_ENV !== 'production') return;
-  // Dynamic require-style import paths avoided — inline the same rules.
-  const driver = String(env.OBJECT_STORAGE_DRIVER || (env.NODE_ENV === 'production' ? 's3' : 'local')).toLowerCase();
+  // Keep in sync with objectStorage.resolveObjectStorageDriver (production default: supabase).
+  const raw = String(env.OBJECT_STORAGE_DRIVER || '').trim().toLowerCase();
+  const driver = raw === 's3' || raw === 'local' || raw === 'supabase'
+    ? raw
+    : 'supabase';
+
   if (driver === 'local' && env.ALLOW_LOCAL_UPLOADS_IN_PRODUCTION !== '1') {
     throw new Error(
       '[security] Refusing to start: production requires durable object storage '
-      + '(OBJECT_STORAGE_DRIVER=s3 with S3_BUCKET/AWS_REGION, or ALLOW_LOCAL_UPLOADS_IN_PRODUCTION=1).'
+      + '(OBJECT_STORAGE_DRIVER=supabase with SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / SUPABASE_STORAGE_BUCKET, '
+      + 'or OBJECT_STORAGE_DRIVER=s3 with S3_BUCKET/AWS_REGION, or ALLOW_LOCAL_UPLOADS_IN_PRODUCTION=1).'
     );
   }
+
+  if (driver === 'supabase') {
+    const missing: string[] = [];
+    if (!String(env.SUPABASE_URL || '').trim()) missing.push('SUPABASE_URL');
+    if (!String(env.SUPABASE_SERVICE_ROLE_KEY || '').trim()) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+    if (!String(env.SUPABASE_STORAGE_BUCKET || '').trim()) missing.push('SUPABASE_STORAGE_BUCKET');
+    if (missing.length) {
+      throw new Error(
+        '[security] Refusing to start: Supabase object storage selected but configuration is incomplete '
+        + `(missing ${missing.join(', ')}).`
+      );
+    }
+    try {
+      const parsed = new URL(String(env.SUPABASE_URL).trim());
+      if ((parsed.protocol !== 'https:' && parsed.protocol !== 'http:') || !parsed.hostname) {
+        throw new Error('invalid');
+      }
+    } catch {
+      throw new Error(
+        '[security] Refusing to start: SUPABASE_URL is not a valid http(s) URL.'
+      );
+    }
+    const bucket = String(env.SUPABASE_STORAGE_BUCKET).trim();
+    if (!/^[a-z0-9][a-z0-9._-]{1,62}$/i.test(bucket)) {
+      throw new Error(
+        '[security] Refusing to start: SUPABASE_STORAGE_BUCKET name is invalid.'
+      );
+    }
+  }
+
   if (driver === 's3') {
     const hasBucket = Boolean(env.S3_BUCKET && (env.AWS_REGION || env.S3_REGION));
     if (!hasBucket) {
@@ -203,6 +238,7 @@ export function assertProductionSecurityIntegrations(env: RuntimeEnv = process.e
       );
     }
   }
+
   if (env.MALWARE_SCAN_REQUIRED !== '0') {
     const scannerOk = Boolean(env.MALWARE_SCANNER_URL || env.CLAMAV_HOST || env.MALWARE_SCANNER_ENABLED === '1');
     if (!scannerOk) {

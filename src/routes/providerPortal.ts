@@ -1,14 +1,15 @@
-import { Router, Response, NextFunction, type Request } from 'express';
-import multer, { type FileFilterCallback } from 'multer';
-import fs from 'node:fs';
+import { Router, Response, NextFunction } from 'express';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { z } from 'zod';
 import { Role } from '@prisma/client';
 import { AuthRequest, allowRoles } from '../middleware/auth';
 import { audit } from '../lib/audit';
 import { prisma } from '../lib/prisma';
-import { ensureUploadDir } from '../lib/uploadDir';
+import {
+  createMemoryUpload,
+  persistUploadedDocumentFile,
+  pipeDocumentFileToResponse
+} from '../lib/documentObjectStore';
 import {
   assertProviderOwnsIntake,
   createIntakeDocumentMeta,
@@ -18,41 +19,10 @@ import {
   saveProviderDraft,
   submitProviderIntake
 } from '../services/providerIntake';
-import {
-  GENERAL_ALLOWED_MIME,
-  validateUploadedFile
-} from '../services/fileMagic';
+import { GENERAL_ALLOWED_MIME } from '../services/fileMagic';
 
 const router = Router();
-const uploadDir = ensureUploadDir();
-
-const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
-      cb(null, uploadDir);
-    },
-    filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
-      cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase().slice(0, 12)}`);
-    }
-  }),
-  limits: { fileSize: 20 * 1024 * 1024, files: 1 },
-  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
-    cb(null, GENERAL_ALLOWED_MIME.has(file.mimetype));
-  }
-});
-
-function safeUnlink(p?: string | null) {
-  if (!p) return;
-  try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* ignore */ }
-}
-
-function resolveStoredPath(storageKey: string) {
-  const safeName = path.basename(storageKey);
-  const fullPath = path.resolve(uploadDir, safeName);
-  if (!fullPath.startsWith(uploadDir + path.sep)) return null;
-  if (!fs.existsSync(fullPath)) return null;
-  return fullPath;
-}
+const upload = createMemoryUpload(GENERAL_ALLOWED_MIME);
 
 const providerOnly = allowRoles(Role.EXTERNAL_PROVIDER, Role.CLIENT_USER, Role.ADMIN, Role.CREDENTIALING_MANAGER, Role.CREDENTIALING_SPECIALIST);
 
@@ -110,35 +80,18 @@ router.post('/intakes/:id/documents', providerOnly, upload.single('file'), async
   try {
     const intake = await assertProviderOwnsIntake(req.user!.id, req.params.id);
     if (!['INVITED', 'IN_PROGRESS', 'CHANGES_REQUESTED', 'DRAFT'].includes(intake.status)) {
-      if (req.file) safeUnlink(req.file.path);
       return res.status(400).json({ error: 'Documents cannot be uploaded for this intake status' });
     }
-    if (!req.file) return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    }
     if (!intake.tenantId) {
-      safeUnlink(req.file.path);
       return res.status(400).json({ error: 'Intake is missing tenant ownership' });
     }
 
     const title = String(req.body.title || req.file.originalname || 'Intake document').slice(0, 200);
     const type = String(req.body.type || 'OTHER').slice(0, 80);
     const category = String(req.body.category || 'intake').slice(0, 80);
-
-    const validation = validateUploadedFile({
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      declaredMime: req.file.mimetype,
-      allowedMimes: GENERAL_ALLOWED_MIME
-    });
-    if (!validation.ok) {
-      safeUnlink(req.file.path);
-      return res.status(400).json({ error: validation.error });
-    }
-
-    // Path traversal: reject dangerous original names
-    if (req.file.originalname.includes('..') || req.file.originalname.includes('/') || req.file.originalname.includes('\\')) {
-      safeUnlink(req.file.path);
-      return res.status(400).json({ error: 'Invalid file name' });
-    }
 
     const doc = await createIntakeDocumentMeta({
       tenantId: intake.tenantId,
@@ -149,16 +102,31 @@ router.post('/intakes/:id/documents', providerOnly, upload.single('file'), async
       category
     });
 
+    const { scanOrQuarantine } = await import('../services/documentSecurity');
+    let persisted;
+    try {
+      persisted = await persistUploadedDocumentFile({
+        tenantId: intake.tenantId,
+        documentId: doc.id,
+        file: req.file,
+        allowedMimes: GENERAL_ALLOWED_MIME,
+        scanDocument: scanOrQuarantine
+      });
+    } catch (e: any) {
+      await prisma.document.delete({ where: { id: doc.id } }).catch(() => undefined);
+      if (e?.status === 400) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+
     const updated = await prisma.document.update({
       where: { id: doc.id },
       data: {
-        storageKey: req.file.filename,
-        originalName: path.basename(req.file.originalname),
-        mimeType: req.file.mimetype,
-        sizeBytes: req.file.size,
+        storageKey: persisted.storageKey,
+        originalName: persisted.originalName,
+        mimeType: persisted.mimeType,
+        sizeBytes: persisted.sizeBytes,
         uploadedAt: new Date(),
-        // Remain quarantined until malware scan policy or manual release
-        securityStatus: 'QUARANTINED'
+        securityStatus: persisted.scan.status
       }
     });
 
@@ -167,13 +135,13 @@ router.post('/intakes/:id/documents', providerOnly, upload.single('file'), async
         intakeId: intake.id,
         action: 'DOCUMENT_UPLOADED',
         actorId: req.user!.id,
-        detail: { documentId: updated.id, title, securityStatus: 'QUARANTINED' }
+        detail: { documentId: updated.id, title, securityStatus: updated.securityStatus }
       }
     });
     await audit(req, 'UPLOAD', 'documents', updated.id, undefined, {
       intakeRequestId: intake.id,
       title,
-      securityStatus: 'QUARANTINED'
+      securityStatus: updated.securityStatus
     });
 
     res.status(201).json({
@@ -188,7 +156,6 @@ router.post('/intakes/:id/documents', providerOnly, upload.single('file'), async
       uploadedAt: updated.uploadedAt
     });
   } catch (e: any) {
-    if (req.file) safeUnlink(req.file.path);
     if (e?.status) return res.status(e.status).json({ error: e.message });
     next(e);
   }
@@ -210,17 +177,18 @@ router.get('/documents/:id/file', providerOnly, async (req: AuthRequest, res: Re
         securityStatus: doc.securityStatus
       });
     }
-    const fullPath = resolveStoredPath(doc.storageKey);
-    if (!fullPath) return res.status(404).json({ error: 'File not found' });
     await audit(req, 'DOWNLOAD', 'documents', doc.id, undefined, {
       intakeRequestId: doc.intakeRequestId,
       securityStatus: doc.securityStatus
     });
-    res.setHeader('Content-Type', doc.mimeType || 'application/octet-stream');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'no-store');
-    res.setHeader('Content-Disposition', `attachment; filename="${path.basename(doc.originalName || 'document')}"`);
-    fs.createReadStream(fullPath).pipe(res);
+    const piped = await pipeDocumentFileToResponse(res, doc.storageKey, {
+      mimeType: doc.mimeType,
+      downloadName: path.basename(doc.originalName || 'document'),
+      inline: false
+    });
+    if (!piped.ok) {
+      return res.status(404).json({ error: piped.error, code: piped.code });
+    }
   } catch (e: any) {
     if (e?.status) return res.status(e.status).json({ error: e.message });
     next(e);

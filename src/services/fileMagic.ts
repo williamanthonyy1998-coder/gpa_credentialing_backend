@@ -46,13 +46,11 @@ export function sniffMimeFromBuffer(buf: Buffer): string | null {
   return null;
 }
 
-export function validateUploadedFile(opts: {
-  filePath: string;
-  originalName: string;
-  declaredMime: string;
-  allowedMimes: Set<string>;
-}): { ok: true; mimeType: string } | { ok: false; error: string } {
-  const { filePath, originalName, declaredMime, allowedMimes } = opts;
+function validateMimeAndName(
+  originalName: string,
+  declaredMime: string,
+  allowedMimes: Set<string>
+): { ok: true } | { ok: false; error: string } {
   if (!allowedMimes.has(declaredMime)) {
     const imagePdfOnly = [...allowedMimes].every((m) => SECURE_IMAGE_PDF_ONLY.has(m));
     return {
@@ -65,25 +63,56 @@ export function validateUploadedFile(opts: {
   if (!extensionAllowedForMime(originalName, declaredMime)) {
     return { ok: false, error: 'File extension does not match the declared MIME type.' };
   }
+  if (/\.(exe|bat|cmd|ps1|sh|js|msi|dll|com|scr)$/i.test(originalName)) {
+    return { ok: false, error: 'Executable files are not allowed.' };
+  }
+  return { ok: true };
+}
+
+function validateSniffedHeader(
+  header: Buffer,
+  declaredMime: string
+): { ok: true; mimeType: string } | { ok: false; error: string } {
+  const sniffed = sniffMimeFromBuffer(header);
+  if (declaredMime === 'application/pdf' && sniffed !== 'application/pdf') {
+    return { ok: false, error: 'File content is not a valid PDF.' };
+  }
+  if (declaredMime === 'image/jpeg' && sniffed !== 'image/jpeg') {
+    return { ok: false, error: 'File content is not a valid JPEG image.' };
+  }
+  if (declaredMime === 'image/png' && sniffed !== 'image/png') {
+    return { ok: false, error: 'File content is not a valid PNG image.' };
+  }
+  return { ok: true, mimeType: declaredMime };
+}
+
+/** Memory-upload validation — do not trust client Content-Type alone. */
+export function validateUploadedBytes(opts: {
+  buffer: Buffer;
+  originalName: string;
+  declaredMime: string;
+  allowedMimes: Set<string>;
+}): { ok: true; mimeType: string } | { ok: false; error: string } {
+  const nameCheck = validateMimeAndName(opts.originalName, opts.declaredMime, opts.allowedMimes);
+  if (!nameCheck.ok) return nameCheck;
+  const header = opts.buffer.subarray(0, 8);
+  return validateSniffedHeader(header, opts.declaredMime);
+}
+
+export function validateUploadedFile(opts: {
+  filePath: string;
+  originalName: string;
+  declaredMime: string;
+  allowedMimes: Set<string>;
+}): { ok: true; mimeType: string } | { ok: false; error: string } {
+  const { filePath, originalName, declaredMime, allowedMimes } = opts;
+  const nameCheck = validateMimeAndName(originalName, declaredMime, allowedMimes);
+  if (!nameCheck.ok) return nameCheck;
   const fd = fs.openSync(filePath, 'r');
   try {
     const header = Buffer.alloc(8);
     fs.readSync(fd, header, 0, 8, 0);
-    const sniffed = sniffMimeFromBuffer(header);
-    if (declaredMime === 'application/pdf' && sniffed !== 'application/pdf') {
-      return { ok: false, error: 'File content is not a valid PDF.' };
-    }
-    if (declaredMime === 'image/jpeg' && sniffed !== 'image/jpeg') {
-      return { ok: false, error: 'File content is not a valid JPEG image.' };
-    }
-    if (declaredMime === 'image/png' && sniffed !== 'image/png') {
-      return { ok: false, error: 'File content is not a valid PNG image.' };
-    }
-    // Reject obvious executables by extension/name even if somehow declared as allowed
-    if (/\.(exe|bat|cmd|ps1|sh|js|msi|dll|com|scr)$/i.test(originalName)) {
-      return { ok: false, error: 'Executable files are not allowed.' };
-    }
-    return { ok: true, mimeType: declaredMime };
+    return validateSniffedHeader(header, declaredMime);
   } finally {
     fs.closeSync(fd);
   }

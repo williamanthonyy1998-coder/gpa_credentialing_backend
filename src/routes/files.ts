@@ -1,12 +1,16 @@
-import { Router, type Request } from 'express';
-import multer, { type FileFilterCallback } from 'multer';
-import fs from 'node:fs';
+import { Router } from 'express';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../middleware/auth';
 import { audit } from '../lib/audit';
-import { ensureUploadDir } from '../lib/uploadDir';
+import {
+  cleanupTempUploadFile,
+  createMemoryUpload,
+  deleteDocumentStorageObject,
+  materializeStorageKeyToTemp,
+  persistUploadedDocumentFile,
+  pipeDocumentFileToResponse
+} from '../lib/documentObjectStore';
 import {
   computeCredentialAttention,
   isAgreementsCategory,
@@ -23,44 +27,13 @@ import {
   GENERAL_ALLOWED_MIME,
   INSURANCE_ALLOWED_MIME,
   IRS_ALLOWED_MIME,
-  OTHER_DOCUMENTS_ALLOWED_MIME,
-  validateUploadedFile
+  OTHER_DOCUMENTS_ALLOWED_MIME
 } from '../services/fileMagic';
 import { requireTenantContext } from '../services/tenantAccess';
 import { assertResourceRecordAccess } from '../services/orgAccess';
 
 const router = Router();
-const uploadDir = ensureUploadDir();
-
-const storage = multer.diskStorage({
-  destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
-    cb(null, uploadDir);
-  },
-  filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
-    cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase().slice(0, 12)}`);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 20 * 1024 * 1024, files: 1 },
-  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
-    cb(null, GENERAL_ALLOWED_MIME.has(file.mimetype));
-  }
-});
-
-function safeUnlink(p?: string | null) {
-  if (!p) return;
-  try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch { /* ignore */ }
-}
-
-function resolveStoredPath(storageKey: string) {
-  const safeName = path.basename(storageKey);
-  const fullPath = path.resolve(uploadDir, safeName);
-  if (!fullPath.startsWith(uploadDir + path.sep)) return null;
-  if (!fs.existsSync(fullPath)) return null;
-  return fullPath;
-}
+const upload = createMemoryUpload(GENERAL_ALLOWED_MIME);
 
 async function assertDocAccess(req: AuthRequest, documentId: string) {
   requireTenantContext(req.tenantContext);
@@ -73,19 +46,28 @@ async function assertDocAccess(req: AuthRequest, documentId: string) {
   );
 }
 
+function resolveUploadTenantId(document: { tenantId: string | null }, req: AuthRequest): string | null {
+  return document.tenantId || req.tenantContext?.tenantId || null;
+}
+
 router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, next) => {
   try {
-    if (!req.file) return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    if (!req.file?.buffer?.length) {
+      return res.status(400).json({ error: 'Choose a supported file (PDF, JPG, PNG) under 20 MB.' });
+    }
     const document = await prisma.document.findUnique({ where: { id: req.params.id } });
     if (!document) {
-      safeUnlink(req.file.path);
       return res.status(404).json({ error: 'Document record not found' });
     }
     if (['AUDITOR', 'READ_ONLY'].includes(req.user!.role)) {
-      safeUnlink(req.file.path);
       return res.status(403).json({ error: 'Your role cannot upload files' });
     }
     await assertDocAccess(req, document.id);
+
+    const tenantId = resolveUploadTenantId(document, req);
+    if (!tenantId) {
+      return res.status(400).json({ error: 'Document is missing tenant ownership for durable storage' });
+    }
 
     const insurance = isInsuranceLiabilityType(document.type);
     const banking = isBankingCredentialType(document.type) || document.category === 'banking';
@@ -101,20 +83,9 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
           : insurance || banking
             ? (banking ? BANKING_ALLOWED_MIME : INSURANCE_ALLOWED_MIME)
             : GENERAL_ALLOWED_MIME;
-    const validation = validateUploadedFile({
-      filePath: req.file.path,
-      originalName: req.file.originalname,
-      declaredMime: req.file.mimetype,
-      allowedMimes: allowed
-    });
-    if (!validation.ok) {
-      safeUnlink(req.file.path);
-      return res.status(400).json({ error: validation.error });
-    }
 
     const replace = String(req.query.replace || req.body?.replace || '').toLowerCase() === 'true';
     if (document.storageKey && !replace) {
-      safeUnlink(req.file.path);
       return res.status(409).json({
         error: 'A document is already attached. Confirm replace to overwrite the existing file.',
         code: 'REPLACE_REQUIRED'
@@ -122,7 +93,7 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
     }
 
     const previousKey = document.storageKey;
-    // Phase 2C: archive prior file metadata; keep physical file for audit (do not unlink).
+    // Phase 2C: archive prior file metadata; keep physical object for audit (do not delete).
     if (previousKey && replace) {
       const { archiveCurrentFileRevision } = await import('../services/documentSecurity');
       await archiveCurrentFileRevision({
@@ -137,19 +108,31 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
       });
     }
 
-    // H1/H2: every new upload starts quarantined — never auto-AVAILABLE
     const { scanOrQuarantine } = await import('../services/documentSecurity');
-    const scan = await scanOrQuarantine({ documentId: document.id, filePath: req.file.path });
+    let persisted;
+    try {
+      persisted = await persistUploadedDocumentFile({
+        tenantId,
+        documentId: document.id,
+        file: req.file,
+        allowedMimes: allowed,
+        scanDocument: scanOrQuarantine
+      });
+    } catch (e: any) {
+      if (e?.status === 400) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+
     const updated = await prisma.document.update({
       where: { id: document.id },
       data: {
-        storageKey: req.file.filename,
-        originalName: path.basename(req.file.originalname),
-        mimeType: req.file.mimetype,
-        sizeBytes: req.file.size,
+        storageKey: persisted.storageKey,
+        originalName: persisted.originalName,
+        mimeType: persisted.mimeType,
+        sizeBytes: persisted.sizeBytes,
         status: 'RECEIVED',
         uploadedAt: new Date(),
-        securityStatus: scan.status
+        securityStatus: persisted.scan.status
       }
     });
 
@@ -164,7 +147,7 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
         sizeBytes: updated.sizeBytes,
         mimeType: updated.mimeType,
         securityStatus: updated.securityStatus,
-        scanReason: !scan.scanned ? scan.reason : undefined
+        scanReason: !persisted.scan.scanned ? persisted.scan.reason : undefined
       }
     );
 
@@ -178,7 +161,6 @@ router.post('/:id/file', upload.single('file'), async (req: AuthRequest, res, ne
       attention: computeCredentialAttention(updated)
     });
   } catch (e) {
-    if (req.file?.path && fs.existsSync(req.file.path)) safeUnlink(req.file.path);
     next(e);
   }
 });
@@ -201,25 +183,22 @@ router.get('/:id/file', async (req: AuthRequest, res, next) => {
         securityStatus: security
       });
     }
-    const fullPath = resolveStoredPath(document.storageKey);
-    if (!fullPath) return res.status(404).json({ error: 'Stored file was not found' });
 
     const inline = String(req.query.inline || '').toLowerCase() === '1' || String(req.query.disposition || '') === 'inline';
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, no-store');
-    if (document.mimeType) res.type(document.mimeType);
-
     await audit(req, 'DOWNLOAD', 'documents', document.id, undefined, {
       originalName: document.originalName,
       title: document.title,
       inline
     });
 
-    if (inline) {
-      res.setHeader('Content-Disposition', `inline; filename="${path.basename(document.originalName || document.title)}"`);
-      return fs.createReadStream(fullPath).pipe(res);
+    const piped = await pipeDocumentFileToResponse(res, document.storageKey, {
+      mimeType: document.mimeType,
+      downloadName: path.basename(document.originalName || document.title),
+      inline
+    });
+    if (!piped.ok) {
+      return res.status(404).json({ error: piped.error, code: piped.code });
     }
-    res.download(fullPath, path.basename(document.originalName || document.title));
   } catch (e) { next(e); }
 });
 
@@ -253,8 +232,6 @@ router.post('/:id/investigative-download', async (req: AuthRequest, res, next) =
         code: 'USE_NORMAL_DOWNLOAD'
       });
     }
-    const fullPath = resolveStoredPath(document.storageKey);
-    if (!fullPath) return res.status(404).json({ error: 'Stored file was not found' });
 
     await audit(req, 'INVESTIGATIVE_DOWNLOAD', 'documents', document.id, undefined, {
       originalName: document.originalName,
@@ -264,11 +241,15 @@ router.post('/:id/investigative-download', async (req: AuthRequest, res, next) =
       malwareScanned: false
     });
 
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', 'private, no-store');
     res.setHeader('X-Document-Security-Warning', 'INVESTIGATIVE_QUARANTINE_ACCESS');
-    if (document.mimeType) res.type(document.mimeType);
-    res.download(fullPath, path.basename(document.originalName || document.title));
+    const piped = await pipeDocumentFileToResponse(res, document.storageKey, {
+      mimeType: document.mimeType,
+      downloadName: path.basename(document.originalName || document.title),
+      inline: false
+    });
+    if (!piped.ok) {
+      return res.status(404).json({ error: piped.error, code: piped.code });
+    }
   } catch (e) { next(e); }
 });
 
@@ -282,7 +263,7 @@ router.delete('/:id/file', async (req: AuthRequest, res, next) => {
     await assertDocAccess(req, document.id);
     if (!document.storageKey) return res.status(404).json({ error: 'No file is attached' });
 
-    const fullPath = resolveStoredPath(document.storageKey);
+    const priorKey = document.storageKey;
     const updated = await prisma.document.update({
       where: { id: document.id },
       data: {
@@ -294,7 +275,7 @@ router.delete('/:id/file', async (req: AuthRequest, res, next) => {
         status: document.required ? 'MISSING' : 'MISSING'
       }
     });
-    if (fullPath) safeUnlink(fullPath);
+    await deleteDocumentStorageObject(priorKey);
     await audit(req, 'REMOVE_FILE', 'documents', updated.id, {
       originalName: document.originalName,
       sizeBytes: document.sizeBytes
@@ -304,6 +285,7 @@ router.delete('/:id/file', async (req: AuthRequest, res, next) => {
 });
 
 router.post('/:id/extract', async (req: AuthRequest, res, next) => {
+  let tempPath: string | null = null;
   try {
     if (['AUDITOR', 'READ_ONLY', 'CLIENT_USER', 'EXTERNAL_PROVIDER'].includes(req.user!.role)) {
       return res.status(403).json({ error: 'Your role cannot run extraction' });
@@ -330,12 +312,18 @@ router.post('/:id/extract', async (req: AuthRequest, res, next) => {
     if (!insurance && !banking) {
       return res.status(400).json({ error: 'Extraction is only available for insurance or banking credentials', ok: false });
     }
-    const fullPath = resolveStoredPath(document.storageKey);
-    if (!fullPath) return res.status(404).json({ error: 'Stored file was not found', ok: false });
+    tempPath = await materializeStorageKeyToTemp(document.storageKey);
+    if (!tempPath) {
+      return res.status(404).json({
+        error: 'Stored file was not found',
+        ok: false,
+        code: 'NOT_FOUND'
+      });
+    }
 
     const result = banking
-      ? await extractBankingFromFile(fullPath, document.mimeType, document.type)
-      : await extractInsuranceFromFile(fullPath, document.mimeType);
+      ? await extractBankingFromFile(tempPath, document.mimeType, document.type)
+      : await extractInsuranceFromFile(tempPath, document.mimeType);
     await audit(req, 'EXTRACT_DOCUMENT', 'documents', document.id, undefined, {
       ok: result.ok,
       method: result.method,
@@ -347,6 +335,9 @@ router.post('/:id/extract', async (req: AuthRequest, res, next) => {
     });
     res.json(result);
   } catch (e) { next(e); }
+  finally {
+    cleanupTempUploadFile(tempPath);
+  }
 });
 
 export default router;
