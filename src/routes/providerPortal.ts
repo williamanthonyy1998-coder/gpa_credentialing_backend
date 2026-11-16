@@ -1,5 +1,5 @@
-import { Router, Response, NextFunction } from 'express';
-import multer from 'multer';
+import { Router, Response, NextFunction, type Request } from 'express';
+import multer, { type FileFilterCallback } from 'multer';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -28,11 +28,17 @@ const uploadDir = ensureUploadDir();
 
 const upload = multer({
   storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, uploadDir),
-    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase().slice(0, 12)}`)
+    destination: (_req: Request, _file: Express.Multer.File, cb: (error: Error | null, destination: string) => void) => {
+      cb(null, uploadDir);
+    },
+    filename: (_req: Request, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
+      cb(null, `${crypto.randomUUID()}${path.extname(file.originalname).toLowerCase().slice(0, 12)}`);
+    }
   }),
   limits: { fileSize: 20 * 1024 * 1024, files: 1 },
-  fileFilter: (_req, file, cb) => cb(null, GENERAL_ALLOWED_MIME.has(file.mimetype))
+  fileFilter: (_req: Request, file: Express.Multer.File, cb: FileFilterCallback) => {
+    cb(null, GENERAL_ALLOWED_MIME.has(file.mimetype));
+  }
 });
 
 function safeUnlink(p?: string | null) {

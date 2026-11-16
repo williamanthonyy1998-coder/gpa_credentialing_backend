@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
-import cors from 'cors';
+import cors, { type CorsOptions } from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import morgan from 'morgan';
@@ -68,8 +68,8 @@ app.set('trust proxy', resolveTrustProxySetting());
 app.use(helmet({
   crossOriginResourcePolicy: { policy: 'cross-origin' }
 }));
-app.use(cors({
-  origin(origin, callback) {
+const corsOptions: CorsOptions = {
+  origin(origin: string | undefined, callback: (err: Error | null, allow?: boolean | string) => void) {
     // Non-browser clients (no Origin) are fine; browsers must match WEB_ORIGIN exactly.
     if (!origin) return callback(null, true);
     if (isCorsOriginAllowed(origin)) return callback(null, origin);
@@ -84,7 +84,8 @@ app.use(cors({
     'X-Tenant-Id',
     'X-Platform-Access'
   ]
-}));
+};
+app.use(cors(corsOptions));
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
 app.use(morgan(isProductionRuntime() ? 'combined' : 'dev'));

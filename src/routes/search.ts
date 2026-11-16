@@ -1,4 +1,5 @@
 import { Router, Response, NextFunction } from 'express';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../lib/prisma';
 import { AuthRequest } from '../middleware/auth';
 import { getAuthorizedOrganizationIds } from '../services/orgAccess';
@@ -11,6 +12,7 @@ import {
 import { isPlatformAdmin } from '../services/tenants';
 
 const router = Router();
+const insensitive = Prisma.QueryMode.insensitive;
 
 router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
   try {
@@ -45,7 +47,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             orgInTenant,
-            { OR: [{ legalName: { contains: q, mode: 'insensitive' } }, { dba: { contains: q, mode: 'insensitive' } }] }
+            { OR: [{ legalName: { contains: q, mode: insensitive } }, { dba: { contains: q, mode: insensitive } }] }
           ]
         },
         select: { id: true, legalName: true, status: true },
@@ -55,7 +57,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             practiceScope,
-            { OR: [{ name: { contains: q, mode: 'insensitive' } }, { npi: { contains: q } }] }
+            { OR: [{ name: { contains: q, mode: insensitive } }, { npi: { contains: q } }] }
           ]
         },
         select: { id: true, name: true, npi: true, organizationId: true },
@@ -65,7 +67,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             facilityScope,
-            { OR: [{ name: { contains: q, mode: 'insensitive' } }, { npi: { contains: q } }] }
+            { OR: [{ name: { contains: q, mode: insensitive } }, { npi: { contains: q } }] }
           ]
         },
         select: { id: true, name: true, npi: true },
@@ -77,8 +79,8 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
             providerScope,
             {
               OR: [
-                { firstName: { contains: q, mode: 'insensitive' } },
-                { lastName: { contains: q, mode: 'insensitive' } },
+                { firstName: { contains: q, mode: insensitive } },
+                { lastName: { contains: q, mode: insensitive } },
                 { npi: { contains: q } }
               ]
             }
@@ -88,7 +90,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         take
       }),
       prisma.payer.findMany({
-        where: { OR: [{ name: { contains: q, mode: 'insensitive' } }, { payerCode: { contains: q, mode: 'insensitive' } }] },
+        where: { OR: [{ name: { contains: q, mode: insensitive } }, { payerCode: { contains: q, mode: insensitive } }] },
         select: { id: true, name: true, payerCode: true },
         take
       }),
@@ -96,7 +98,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             enrollmentScope,
-            { OR: [{ applicationNo: { contains: q, mode: 'insensitive' } }, { referenceNo: { contains: q, mode: 'insensitive' } }] }
+            { OR: [{ applicationNo: { contains: q, mode: insensitive } }, { referenceNo: { contains: q, mode: insensitive } }] }
           ]
         },
         select: { id: true, applicationNo: true, status: true },
@@ -106,7 +108,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             caseScope,
-            { caseNumber: { contains: q, mode: 'insensitive' } }
+            { caseNumber: { contains: q, mode: insensitive } }
           ]
         },
         select: { id: true, caseNumber: true, status: true },
@@ -116,9 +118,9 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         ? prisma.user.findMany({
           where: {
             OR: [
-              { name: { contains: q, mode: 'insensitive' } },
-              { email: { contains: q, mode: 'insensitive' } },
-              { employeeCode: { contains: q, mode: 'insensitive' } }
+              { name: { contains: q, mode: insensitive } },
+              { email: { contains: q, mode: insensitive } },
+              { employeeCode: { contains: q, mode: insensitive } }
             ]
           },
           select: { id: true, name: true, email: true, role: true },
@@ -129,7 +131,7 @@ router.get('/', async (req: AuthRequest, res: Response, next: NextFunction) => {
         where: {
           AND: [
             taskScope,
-            { title: { contains: q, mode: 'insensitive' } }
+            { title: { contains: q, mode: insensitive } }
           ]
         },
         select: { id: true, title: true, status: true },
