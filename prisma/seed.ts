@@ -40,6 +40,20 @@ async function main() {
   ];
   for (const u of users) await prisma.user.upsert({ where: { email: u.email }, update: { id: u.id, name: u.name, role: u.role, active: true }, create: { ...u, passwordHash, active: true } });
 
+  // Production/demo GPA admin — same password source as other seed users; do not rewrite existing id.
+  const gpaAdmin = await prisma.user.upsert({
+    where: { email: 'greenwaypractices@gmail.com' },
+    update: { name: 'GPA System Administrator', role: Role.ADMIN, active: true },
+    create: {
+      id: 'seed-user-gpa-admin',
+      email: 'greenwaypractices@gmail.com',
+      name: 'GPA System Administrator',
+      role: Role.ADMIN,
+      passwordHash,
+      active: true,
+    },
+  });
+
   // Phase 0A: demo tenant only. Seed organizations are explicitly linked here.
   // Non-seed / legacy Organization rows are intentionally left with tenantId = null
   // (no automatic guessing of client ownership).
@@ -74,6 +88,18 @@ async function main() {
       },
     });
   }
+
+  await prisma.tenantMembership.upsert({
+    where: { userId_tenantId: { userId: gpaAdmin.id, tenantId: demoTenant.id } },
+    update: { role: TenantRole.TENANT_ADMIN, status: TenantMembershipStatus.ACTIVE },
+    create: {
+      id: 'seed-tm-gpa-admin',
+      userId: gpaAdmin.id,
+      tenantId: demoTenant.id,
+      role: TenantRole.TENANT_ADMIN,
+      status: TenantMembershipStatus.ACTIVE,
+    },
+  });
 
   const orgData = [
     { id: 'seed-org-01', legalName: 'Demo Lone Star Medical Group LLC', dba: 'Lone Star Family Care', taxId: 'DEMO-TAX-1001', establishedAt: d('2017-03-15'), contactName: 'Taylor Morgan', contactTitle: 'Practice Administrator', phone: '555-0101', fax: '555-0191', email: 'admin1@example.test', mailingAddress: addr('100 Demo Medical Plaza', 'Houston', 'TX', '77002'), ownership: { status: 'Privately Held', classification: 'LLC', ownerCount: 2 }, bankName: 'Demo Community Bank', bankAccountTitle: 'Lone Star Medical Group LLC', bankContactName: 'Demo Banking Desk', bankContactPhone: '555-0181', bankContactEmail: 'banking1@example.test' },
